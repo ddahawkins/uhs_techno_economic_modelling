@@ -173,7 +173,7 @@ PLOT_X_LIMIT_PERCENT: float | None = None  # e.g. 100.0 to force +/-100%
 
 # Only show sensitivities that change at least one component TCR rate
 # by this amount in any applicable technology.
-PLOT_MATERIALITY_THRESHOLD_PERCENT: float | None = 0.0
+PLOT_MATERIALITY_THRESHOLD_PERCENT: float | None = 10.0
 
 # Paper-wide colour convention requested by the author: sample plasma from 0
 # through 0.9. Technology colours are therefore consistent within this figure.

@@ -900,7 +900,7 @@ def plot_component_rate_factors(
     fig, axes = plt.subplots(
         nrows=len(COMPONENT_GROUPS),
         ncols=len(sensitivities),
-        figsize=(9, 12),
+        figsize=(12, 9),
         squeeze=False,
         sharex="col",
         sharey=True
@@ -990,7 +990,7 @@ def plot_total_linearisation_error(
     fig, axes = plt.subplots(
         nrows=1,
         ncols=len(sensitivities),
-        figsize=(10.5, 3.2),
+        figsize=(12, 9),
         squeeze=False,
         sharey=True,
     )

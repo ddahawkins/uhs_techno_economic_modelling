@@ -1,8 +1,8 @@
 """Calibrate synthetic DGF/SA default reservoir designs to site-grouped cost Q50.
 
 Run from the repository root:
-    pixi run python scripts/experiments/calibrate_reservoir_reference.py \
-        --samples outputs/cost_sensitivity/reservoir_sample_results.csv \
+    pixi run python scripts/experiments/calibrate_reference_design.py `
+        --samples outputs/cost_sensitivity/reservoir_sample_results.csv `
         --groups data/resources/reservoir_geographic_groups.csv
 
 This script NEVER edits package defaults. Costs are reevaluated using the exact
