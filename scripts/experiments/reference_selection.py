@@ -1,13 +1,17 @@
-"""Select geological and economic medoids from documented UHS sites.
+"""Compare UHS design/economic medoids against an arithmetic-mean design.
 
 Run from repository root:
     pixi run python scripts/experiments/reference_selection.py
 
-All cost comparisons hold E/EPR/WTIR constant *within* each technology class.
-Geological and economic medoids are observed configurations, not synthetic
+Each site's cost model uses its own H2 reference working capacity from the
+input CSV; only EPR and WTIR are held fixed within a technology class.
+Design and economic medoids are observed cases, not synthetic
 averages. Site coverage is not an availability-weighted European asset census.
-Missing pressures are never silently imputed; hydrogen volume equivalents
-from natural-gas working volume are NOT physically validated H2 capacities.
+Missing capacities/pressures are never silently imputed; hydrogen volume
+equivalents from natural-gas working volume are not validated H2 capacities.
+The synthetic design averages each source parameter independently, so partially
+documented facilities contribute only to the parameters they report. It is a
+comparison case, not a physically verified storage-site configuration.
 """
 
 from __future__ import annotations
@@ -30,15 +34,16 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
               "Abandonment pressure bar", "Minimum pressure bar",
               "Min. Op. Pressure", "Maximum pressure bar", "Notes and sources")
 
-# Fixed design assumptions carried over from the previous cost_sensitivity.py
-# (GWh LHV, EPR in days, withdrawal/injection flow ratio).
-FACILITIES = {"DGF": (1700., 66., 2.), "SA": (1700., 66., 2.),
-              "SC": (750., 12., 2.), "LRC": (20., 7.5, 2.)}
+# Only EPR (days) and WTIR (withdrawal/injection ratio) are fixed. Each site's
+# capacity E comes from its "H2 reference working GWh" CSV field.
+REFERENCE_RATIOS = {"DGF": (66., 2.), "SA": (66., 2.),
+                    "SC": (12., 2.), "LRC": (7.5, 2.)}
+CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
 DESIGN_RANGES = {
-    "DGF": ((960., 1700., 2900.), (33., 66., 100.), (1., 2., 3.)),
-    "SA": ((960., 1700., 2900.), (33., 66., 100.), (1., 2., 3.)),
-    "SC": ((500., 750., 1000.), (6., 12., 18.), (1., 2., 3.)),
-    "LRC": ((10., 20., 20.), (5., 7.5, 10.), (1., 2., 3.)),
+    "DGF": ((33., 66., 100.), (1., 2., 3.)),
+    "SA": ((33., 66., 100.), (1., 2., 3.)),
+    "SC": ((6., 12., 18.), (1., 2., 3.)),
+    "LRC": ((5., 7.5, 10.), (1., 2., 3.)),
 }
 
 # Reference settings from the old exogenous cost-sensitivity registry. The
@@ -103,13 +108,16 @@ class Site:
     abandonment_bar: float | None
     pmin_bar: float | None
     pmax_bar: float | None
-    h2_screening_gwh: float | None
+    h2_reference_gwh: float | None
     cavern_max_m3: float | None
     notes: str
     min_source: str
+    raw_pmin_bar: float | None = None
 
     def vector(self) -> tuple[float, ...]:
-        vals = [self.depth_m, self.pmin_bar, self.pmax_bar]
+        # The site configuration includes scale as well as geological properties.
+        vals = [self.h2_reference_gwh, self.depth_m,
+                self.pmin_bar, self.pmax_bar]
         if self.cls == "DGF":
             vals.insert(1, self.abandonment_bar)
         if any(x is None for x in vals):
@@ -154,9 +162,10 @@ def read_sites(path: Path) -> list[Site]:
                 depth_m=number(row["Reference depth m"]),
                 abandonment_bar=number(row["Abandonment pressure bar"]),
                 pmin_bar=chosen_min, pmax_bar=number(row["Maximum pressure bar"]),
-                h2_screening_gwh=number(row["H2 reference working GWh"]),
+                h2_reference_gwh=number(row["H2 reference working GWh"]),
                 cavern_max_m3=number(row["Cavern volume maximum m3"]),
                 notes=row["Notes and sources"].strip(), min_source=source,
+                raw_pmin_bar=explicit_min,
             ))
     return sites
 
@@ -165,15 +174,22 @@ def site_issue(site: Site, min_lrc_volume: float) -> str:
     if site.cls == "LRC" and site.cavern_max_m3 is not None:
         if site.cavern_max_m3 < min_lrc_volume:
             return f"pilot cavern under {min_lrc_volume:g} m3"
-    required = [("depth", site.depth_m), ("pmin", site.pmin_bar),
+    required = [("H2 reference working GWh", site.h2_reference_gwh),
+                ("depth", site.depth_m), ("pmin", site.pmin_bar),
                 ("pmax", site.pmax_bar)]
     if site.cls == "DGF":
         required.append(("abandonment", site.abandonment_bar))
     missing = [key for key, value in required if value is None]
     if missing:
         return "missing " + ", ".join(missing)
+    if site.h2_reference_gwh <= 0:
+        return "nonpositive H2 reference working GWh"
     if site.depth_m <= 0 or not 0 < site.pmin_bar < site.pmax_bar:
         return "invalid depth or pressure order"
+    pipeline_bar = GENERAL_ALL["pipeline_pressure_pa"] / 1e5
+    if site.pmax_bar <= pipeline_bar:
+        return (f"pmax {site.pmax_bar:g} bar does not exceed "
+                f"assumed pipeline pressure {pipeline_bar:g} bar")
     if site.cls == "DGF" and not 0 < site.abandonment_bar < site.pmin_bar:
         return "invalid DGF abandonment-pressure order"
     return ""
@@ -186,7 +202,7 @@ def site_fields(site: Site) -> dict[str, Any]:
             "abandonment_pressure_bar": site.abandonment_bar,
             "minimum_pressure_bar": site.pmin_bar,
             "maximum_pressure_bar": site.pmax_bar,
-            "h2_screening_equivalent_gwh": site.h2_screening_gwh,
+            "E_gwh": site.h2_reference_gwh,
             "cavern_maximum_volume_m3": site.cavern_max_m3,
             "min_pressure_source": site.min_source, "notes_and_sources": site.notes}
 
@@ -294,6 +310,14 @@ def model_costs(site: Site, models: dict, facility: tuple[float, float, float]) 
     return component_rates(result)
 
 
+def reference_facility(site: Site) -> tuple[float, float, float]:
+    """Use the site's CSV working capacity with class-fixed EPR and WTIR."""
+    if (site.h2_reference_gwh is None or not math.isfinite(site.h2_reference_gwh)
+            or site.h2_reference_gwh <= 0):
+        raise ValueError(f"Missing/invalid H2 working capacity: {site.cls}/{site.name}")
+    return (site.h2_reference_gwh, *REFERENCE_RATIOS[site.cls])
+
+
 def weighted_median(values: list[float], weights: list[float]) -> float:
     """Weighted Q50 with interpolation between cumulative-weight midpoints."""
     pairs = sorted(zip(values, weights))
@@ -374,15 +398,70 @@ def site_weights(sites: list[Site]) -> list[float]:
     return [1. / counts[key] for key in keys]
 
 
+def average_design(cls: str, sites: list[Site], min_lrc_volume: float
+                   ) -> tuple[Site, dict[str, int]]:
+    """Mean each available source field, with one vote per distinct facility.
+
+    The population includes partially documented sites. For minimum pressure,
+    use only the *reported* minimum, not the 55-bar pipeline fallback. The
+    separate resulting means may not describe a real geological configuration;
+    validate the combination before passing it to the cost model.
+    """
+    eligible = [s for s in sites if s.cls == cls and not (
+        cls == "LRC" and s.cavern_max_m3 is not None
+        and s.cavern_max_m3 < min_lrc_volume)]
+    if not eligible:
+        raise ValueError(f"No source sites for synthetic {cls} design")
+    fields = ("h2_reference_gwh", "depth_m", "raw_pmin_bar", "pmax_bar")
+    if cls == "DGF":
+        fields += ("abandonment_bar",)
+    values: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for field in fields:
+        by_facility: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+        for site in eligible:
+            value = getattr(site, field)
+            if value is None:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"Invalid {field} for {cls}/{site.name}: {value}")
+            by_facility[group_key(site)].append(value)
+        if not by_facility:
+            raise ValueError(f"No documented {field} values to average for {cls}")
+        # Repeated entries for one facility are first consolidated; no site is
+        # weighted by how many duplicate records happen to be in the CSV.
+        site_means = [sum(xs) / len(xs) for xs in by_facility.values()]
+        values[field] = sum(site_means) / len(site_means)
+        counts[field] = len(site_means)
+    result = Site(
+        row_index=0, cls=cls, name="Arithmetic mean (synthetic)",
+        country="Synthetic comparison", depth_m=values["depth_m"],
+        abandonment_bar=values.get("abandonment_bar"),
+        pmin_bar=values["raw_pmin_bar"], pmax_bar=values["pmax_bar"],
+        h2_reference_gwh=values["h2_reference_gwh"], cavern_max_m3=None,
+        notes="Independent source-field arithmetic means; not a real site.",
+        min_source="Mean of reported minima only (no 55-bar fallback)",
+        raw_pmin_bar=values["raw_pmin_bar"],
+    )
+    issue = site_issue(result, min_lrc_volume)
+    if issue:
+        raise ValueError(
+            f"Synthetic {cls} means are not a valid cost-model configuration: "
+            f"{issue}; values={values}. Do not silently repair these means."
+        )
+    return result, counts
+
+
 def evaluate_class(cls: str, sites: list[Site], models: dict,
                    quality: dict[int, dict], min_sites: int,
-                   ) -> tuple[dict, list[dict], list[dict], list[Site]]:
+                   min_lrc_volume: float,
+                   ) -> tuple[dict, list[dict], list[dict], list[Site], dict | None]:
     selected = [s for s in sites if s.cls == cls and not quality[s.row_index]["reason"]]
     successful: list[Site] = []
     rates: list[dict[str, float]] = []
     for site in selected:
         try:
-            result = model_costs(site, models, FACILITIES[cls])
+            result = model_costs(site, models, reference_facility(site))
         except Exception as exc:
             quality[site.row_index]["status"] = "model_failure"
             quality[site.row_index]["reason"] = f"{type(exc).__name__}: {exc}"
@@ -394,17 +473,20 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
     n_groups = len({group_key(s) for s in successful})
     summary: dict[str, Any] = {
         "storage_class": cls, "n_total": sum(s.cls == cls for s in sites),
-        "n_geology_complete": len(selected), "n_model_success": n,
+        "n_eligible": len(selected), "n_model_success": n,
         "n_distinct_facilities": n_groups,
         "n_model_failure": len(selected)-n, "minimum_cohort_size": min_sites,
-        "E_gwh": FACILITIES[cls][0], "EPR_days": FACILITIES[cls][1],
-        "WTIR": FACILITIES[cls][2],
+        "capacity_basis": "site H2 reference working GWh (CSV)",
+        "min_E_gwh": min((s.h2_reference_gwh for s in successful), default=None),
+        "max_E_gwh": max((s.h2_reference_gwh for s in successful), default=None),
+        "EPR_days": REFERENCE_RATIOS[cls][0],
+        "WTIR": REFERENCE_RATIOS[cls][1],
         "status": "underpowered" if n_groups < min_sites else "ok",
     }
     if n_groups < min_sites:
         summary["issue"] = (f"Only {n_groups} independent facilities ({n} rows); "
                             f"need >= {min_sites} for a medoid comparison")
-        return summary, [], [], successful
+        return summary, [], [], successful, None
     weights = site_weights(successful)
     geo = medoid_ranking([s.vector() for s in successful], weights)
     econ = medoid_ranking([tuple(r[c] for c in COSTS) for r in rates], weights)
@@ -412,16 +494,30 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
     gscore = dict((i, score) for score, i in geo)
     escore = dict((i, score) for score, i in econ)
     medians = {c: weighted_median([r[c] for r in rates], weights) for c in COSTS}
+    synthetic_site, mean_counts = average_design(cls, sites, min_lrc_volume)
+    try:
+        synthetic_rates = model_costs(synthetic_site, models,
+                                      reference_facility(synthetic_site))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Synthetic {cls} arithmetic-mean design could not be costed: "
+            f"{type(exc).__name__}: {exc}; source counts={mean_counts}"
+        ) from exc
+    synthetic = {**site_fields(synthetic_site), **synthetic_rates,
+                 "EPR_days": REFERENCE_RATIOS[cls][0],
+                 "WTIR": REFERENCE_RATIOS[cls][1],
+                 **{f"n_source_{field}": count
+                    for field, count in mean_counts.items()}}
     rows = []
     for i, (site, result) in enumerate(zip(successful, rates)):
         rows.append({**site_fields(site), **result,
                      "group_weight": weights[i],
-                     "geological_medoid_score": gscore[i],
+                     "design_medoid_score": gscore[i],
                      "economic_medoid_score": escore[i],
-                     "is_geological_medoid": i == geo_i,
+                     "is_design_medoid": i == geo_i,
                      "is_economic_medoid": i == econ_i})
-    summary.update({"geological_medoid_site": successful[geo_i].name,
-                    "geological_medoid_row": successful[geo_i].row_index,
+    summary.update({"design_medoid_site": successful[geo_i].name,
+                    "design_medoid_row": successful[geo_i].row_index,
                     "economic_medoid_site": successful[econ_i].name,
                     "economic_medoid_row": successful[econ_i].row_index,
                     "same_medoid": geo_i == econ_i,
@@ -431,37 +527,51 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
         x = rates[geo_i][c]
         y = rates[econ_i][c]
         target = medians[c]
+        synthetic_rate = synthetic_rates[c]
         comparisons.append({"storage_class": cls, "component": c,
                             "median_site_cost_rate": target,
-                            "geological_medoid_rate": x,
+                            "design_medoid_rate": x,
                             "economic_medoid_rate": y,
-                            "geo_vs_econ_pct": 100*(x/y - 1),
-                            "geo_vs_median_pct": 100*(x/target - 1),
-                            "econ_vs_median_pct": 100*(y/target - 1)})
-    return summary, rows, comparisons, [successful[geo_i], successful[econ_i]]
+                            "synthetic_mean_rate": synthetic_rate,
+                            "design_vs_econ_pct": 100*(x/y - 1),
+                            "design_vs_median_pct": 100*(x/target - 1),
+                            "econ_vs_median_pct": 100*(y/target - 1),
+                            "synthetic_vs_median_pct": 100*(synthetic_rate/target - 1),
+                            "synthetic_vs_econ_pct": 100*(synthetic_rate/y - 1)})
+    return summary, rows, comparisons, [successful[geo_i], successful[econ_i]], synthetic
 
 
 def sweep_design(cls: str, medoids: list[Site], models: dict,
                  n_steps: int, quality: dict[int, dict]
                  ) -> list[dict[str, Any]]:
-    """OAT E/EPR/WTIR screens at selected real depth-pressure configurations."""
+    """OAT E/EPR/WTIR screens about each selected site's CSV working capacity."""
     result = []
     for parameter_index, parameter in enumerate(("E_gwh", "EPR_days", "WTIR")):
-        low, ref, high = DESIGN_RANGES[cls][parameter_index]
-        if low == high:
-            continue
-        values = [low + i*(high-low)/(n_steps-1) for i in range(n_steps)]
-        if not any(math.isclose(v, ref) for v in values):
-            values.append(ref)
-        for role, site in zip(("geological_medoid", "economic_medoid"), medoids):
+        for role, site in zip(("design_medoid", "economic_medoid"), medoids):
+            baseline = reference_facility(site)
+            if parameter_index == 0:
+                low = baseline[0] * CAPACITY_SWEEP_FACTORS[0]
+                ref = baseline[0]
+                high = baseline[0] * CAPACITY_SWEEP_FACTORS[1]
+            else:
+                low, ref, high = DESIGN_RANGES[cls][parameter_index-1]
+            if not 0 < low <= ref <= high:
+                raise ValueError(f"Invalid OAT range for {cls}/{site.name}: {(low, ref, high)}")
+            if low == high:
+                continue
+            values = [low + i*(high-low)/(n_steps-1) for i in range(n_steps)]
+            if not any(math.isclose(v, ref) for v in values):
+                values.append(ref)
             for value in sorted(values):
-                facility = list(FACILITIES[cls])
+                facility = list(baseline)
                 facility[parameter_index] = value
                 record = {"storage_class": cls, "selected_role": role,
                           "selected_site": site.name, "csv_row": site.row_index,
                           "varied_parameter": parameter, "parameter_value": value,
-                          "fixed_E_gwh": facility[0],
-                          "fixed_EPR_days": facility[1], "fixed_WTIR": facility[2]}
+                          "reference_E_gwh": baseline[0],
+                          "tested_E_gwh": facility[0],
+                          "tested_EPR_days": facility[1],
+                          "tested_WTIR": facility[2]}
                 try:
                     record.update(model_costs(site, models, tuple(facility)))
                     record["status"] = "ok"
@@ -477,34 +587,44 @@ def plot_cost_distribution(cls: str, rows: list[dict[str, Any]],
                            comparisons: list[dict], path: Path) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
+    plasma = plt.get_cmap("plasma")
+    colors = {"design": plasma(.13), "economic": plasma(.53),
+              "synthetic": plasma(.83)}
     fig, axes = plt.subplots(1, 3, figsize=(12.3, 3.7), layout="constrained")
     for ax, metric, comp in zip(axes, COSTS, comparisons):
-        values = [float(row[metric]) for row in rows]
-        ax.scatter(range(len(values)), sorted(values), s=23, alpha=.55,
-                   c="#7892a4", label="Evaluated sites", zorder=2)
+        values = sorted(float(row[metric]) for row in rows)
+        point_colors = [plasma(.22 + .56*i/max(1, len(values)-1))
+                        for i in range(len(values))]
+        ax.scatter(range(len(values)), values, s=23, alpha=.70,
+                   c='grey', label="Evaluated sites", zorder=2)
         ax.axhline(comp["median_site_cost_rate"], color="0.3", ls="--", lw=1.2)
-        ax.axhline(comp["geological_medoid_rate"], color="#156c9b", lw=2.0)
-        ax.axhline(comp["economic_medoid_rate"], color="#d36b27", lw=2.0)
+        ax.axhline(comp["design_medoid_rate"], color=colors["design"], lw=2.0)
+        ax.axhline(comp["economic_medoid_rate"], color=colors["economic"], lw=2.0)
+        ax.axhline(comp["synthetic_mean_rate"], color=colors["synthetic"],
+                   lw=2.0, ls="-.")
         labels = {COSTS[0]: "Injection [EUR/kW]", COSTS[1]: "Storage [EUR/kWh]",
                   COSTS[2]: "Withdrawal [EUR/kW]"}
         ax.set_title(labels[metric])
         ax.set_xlabel("Candidate rank (ascending TCR)")
         ax.set_xlim(-.5, len(values)-.5)
         ax.grid(axis="y", color=".9", lw=.8)
-    fig.suptitle(f"{cls}: cost distribution and selected medoids (common E/EPR/WTIR)")
+    fig.suptitle(f"{cls}: cost distribution, medoids, and arithmetic-mean design")
     fig.legend(handles=[Line2D([0], [0], color="0.3", ls="--", label="Site median"),
-                        Line2D([0], [0], color="#156c9b", lw=2, label="Geological medoid"),
-                        Line2D([0], [0], color="#d36b27", lw=2, label="Economic medoid")],
-               ncol=3, loc="lower center", bbox_to_anchor=(.5, -.10), frameon=False)
+                        Line2D([0], [0], color=colors["design"], lw=2, label="Design medoid"),
+                        Line2D([0], [0], color=colors["economic"], lw=2, label="Economic medoid"),
+                        Line2D([0], [0], color=colors["synthetic"], lw=2, ls="-.",
+                               label="Arithmetic-mean design")],
+               ncol=4, loc="lower center", bbox_to_anchor=(.5, -.10), frameon=False)
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_sweeps(cls: str, sweep: list[dict[str, Any]], path: Path) -> None:
     import matplotlib.pyplot as plt
+    plasma = plt.get_cmap("plasma")
     fig, axes = plt.subplots(3, 3, figsize=(12, 9), layout="constrained")
-    roles = [("geological_medoid", "#156c9b"),
-             ("economic_medoid", "#d36b27")]
+    roles = [("design_medoid", plasma(.13)),
+             ("economic_medoid", plasma(.53))]
     names = ("E_gwh", "EPR_days", "WTIR")
     for j, parameter in enumerate(names):
         for k, cost in enumerate(COSTS):
@@ -516,7 +636,7 @@ def plot_sweeps(cls: str, sweep: list[dict[str, Any]], path: Path) -> None:
                 if sampled:
                     ax.plot([r["parameter_value"] for r in sampled],
                             [r[cost] for r in sampled], "-o", markersize=3,
-                            color=color, label=role.replace("_", " "))
+                            color=color, label=role.replace("_", " ").title())
             ax.grid(color=".9", lw=.8)
             if k == 0:
                 ax.set_title(parameter.replace("_", " "))
@@ -567,24 +687,26 @@ def main() -> None:
         if not problem and args.require_raw_pmin and "raw minimum missing" in site.min_source:
             problem = "operating minimum is inferred; --require-raw-pmin is set"
         quality[site.row_index] = {
-            **site_fields(site), "status": "incomplete_or_excluded" if problem else "geology_complete",
+            **site_fields(site), "status": "incomplete_or_excluded" if problem else "eligible_for_costing",
             "reason": problem,
         }
     print(f"Read {len(sites)} site rows from {args.input}")
     for cls in args.classes:
         all_count = sum(s.cls == cls for s in sites)
         complete = sum(s.cls == cls and not quality[s.row_index]["reason"] for s in sites)
-        print(f"  {cls}: {complete}/{all_count} paired geological configurations")
+        print(f"  {cls}: {complete}/{all_count} complete capacity/geology configurations")
 
     summaries: list[dict] = []
     ranked: list[dict] = []
     comparisons: list[dict] = []
     sensitivity: list[dict] = []
+    synthetic_designs: list[dict] = []
     if not args.validate_only:
         models = load_models()
         for cls in args.classes:
-            summary, class_rows, comp, medoids = evaluate_class(
-                cls, sites, models, quality, args.min_sites)
+            summary, class_rows, comp, medoids, synthetic = evaluate_class(
+                cls, sites, models, quality, args.min_sites,
+                args.min_lrc_cavern_m3)
             summaries.append(summary)
             ranked.extend(class_rows)
             comparisons.extend(comp)
@@ -593,8 +715,26 @@ def main() -> None:
             if summary["status"] != "ok":
                 print(f"    WARNING: {summary['issue']}")
                 continue
-            print(f"    Geological medoid: {summary['geological_medoid_site']}; "
-                  f"economic medoid: {summary['economic_medoid_site']}")
+            print(f"    Design Medoid: {summary['design_medoid_site']}; "
+                  f"Economic Medoid: {summary['economic_medoid_site']}")
+            if synthetic is None:
+                raise RuntimeError(f"Missing synthetic mean despite eligible {cls} cohort")
+            synthetic_designs.append(synthetic)
+            print("    Arithmetic-mean design (independent available-source means): "
+                  f"E={synthetic['E_gwh']:.2f} GWh, "
+                  f"depth={synthetic['depth_m']:.1f} m, "
+                  f"pmin={synthetic['minimum_pressure_bar']:.1f} bar, "
+                  f"pmax={synthetic['maximum_pressure_bar']:.1f} bar" +
+                  (f", pab={synthetic['abandonment_pressure_bar']:.1f} bar"
+                   if cls == "DGF" else ""))
+            print("      Rates: " + ", ".join(
+                f"{key}={synthetic[key]:.4g}" for key in COSTS))
+            print("      Available-site counts per mean: " + ", ".join(
+                f"{field}={synthetic[f'n_source_{field}']}"
+                for field in (("h2_reference_gwh", "depth_m", "raw_pmin_bar",
+                               "pmax_bar", "abandonment_bar") if cls == "DGF"
+                              else ("h2_reference_gwh", "depth_m",
+                                    "raw_pmin_bar", "pmax_bar"))))
             sweep = sweep_design(cls, medoids, models, args.sweep_points, quality)
             sensitivity.extend(sweep)
             if not args.no_plots:
@@ -610,11 +750,12 @@ def main() -> None:
         print("CSV-only validation complete; cost functions not executed.")
         return
 
-    summary_cols = ["storage_class", "status", "issue", "n_total", "n_geology_complete",
+    summary_cols = ["storage_class", "status", "issue", "n_total", "n_eligible",
                     "n_model_success", "n_distinct_facilities", "n_model_failure",
                     "minimum_cohort_size",
-                    "E_gwh", "EPR_days", "WTIR", "geological_medoid_site",
-                    "geological_medoid_row", "economic_medoid_site",
+                    "capacity_basis", "min_E_gwh", "max_E_gwh",
+                    "EPR_days", "WTIR", "design_medoid_site",
+                    "design_medoid_row", "economic_medoid_site",
                     "economic_medoid_row", "same_medoid"]
     write_csv(args.output_dir / "selection_summary.csv", summaries, summary_cols)
     if ranked:
@@ -622,43 +763,26 @@ def main() -> None:
                   list(ranked[0]))
         selected_rows = []
         for r in ranked:
-            if r["is_geological_medoid"] or r["is_economic_medoid"]:
+            if r["is_design_medoid"] or r["is_economic_medoid"]:
                 selected_rows.append(r)
         write_csv(args.output_dir / "selected_references.csv", selected_rows,
                   list(ranked[0]))
     comparison_cols = ["storage_class", "component", "median_site_cost_rate",
-                       "geological_medoid_rate", "economic_medoid_rate",
-                       "geo_vs_econ_pct", "geo_vs_median_pct", "econ_vs_median_pct"]
+                       "design_medoid_rate", "economic_medoid_rate",
+                       "synthetic_mean_rate", "design_vs_econ_pct",
+                       "design_vs_median_pct", "econ_vs_median_pct",
+                       "synthetic_vs_median_pct", "synthetic_vs_econ_pct"]
     write_csv(args.output_dir / "medoid_cost_comparison.csv", comparisons,
               comparison_cols)
+    if synthetic_designs:
+        mean_columns = list(synthetic_designs[0])
+        for item in synthetic_designs[1:]:
+            mean_columns.extend(col for col in item if col not in mean_columns)
+        write_csv(args.output_dir / "synthetic_mean_designs.csv",
+                  synthetic_designs, mean_columns)
     if sensitivity:
         write_csv(args.output_dir / "selected_design_sensitivity.csv", sensitivity,
                   list(sensitivity[0]))
-    readme = (
-        "UHS REFERENCE SELECTION\n\n"
-        "Geological medoid: real site minimising pairwise robustly-scaled "
-        "Euclidean distances in log(depth, pmin, pmax[, DGF pab]) space.\n"
-        "Economic medoid: same definition in log(injection, storage, withdrawal "
-        "CAPEX+ABEX unit TCR) space. Samples evaluated at COMMON E/EPR/WTIR "
-        "per class, not at their natural-gas capacity.\n"
-        "Each distinct (class,country,normalised site name) has weight one; "
-        "duplicates (including Hähnlein/Haehnlein) split this weight. "
-        "No empirical availability/capacity weights.\n"
-        "Component site medians use those same group weights.\n"
-        "Rates in EUR/kW injection, EUR/kWh storage, EUR/kW withdrawal.\n"
-        "The H2-equivalent capacity column is only a volume-based screen.\n"
-        "No replacement or estimation of missing geological fields; Min. Op. "
-        "Pressure is taken from the reviewed CSV, with its source indicated.\n"
-        "LRC tiny pilots are excluded; conceptual projects remain visible in "
-        "quality table even when incomplete.\n"
-        "Missing or physically invalid configurations, failed package runs "
-        "and underpowered classes are visible in the CSVs and terminal.\n"
-        "The design sensitivities are OAT model responses at each selected "
-        "observed configuration, NOT a ground-truth validation.\n"
-        "No actual physical H2 operability nor investable-site distribution "
-        "is claimed by this analysis.\n"
-    )
-    (args.output_dir / "README.txt").write_text(readme, encoding="utf-8")
     failed = [r for r in quality_rows if r["status"] == "model_failure"]
     underpowered = [r for r in summaries if r["status"] == "underpowered"]
     sweeps_failed = [r for r in sensitivity if r["status"] == "model_failure"]
