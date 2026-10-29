@@ -43,8 +43,8 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.SALT_CAVERN,
     general_overrides={
         'reference_reservoir_depth_m': 1000,
-        'minimum_operating_pressure_pa': 72e5,
-        'maximum_operating_pressure_pa': 180e5,
+        'minimum_operating_pressure_pa': 60e5,
+        'maximum_operating_pressure_pa': 190e5,
         'abandonment_pressure_pa': 0,
     }
 )
@@ -175,6 +175,19 @@ def construct_project(
         )
     )
 
+    if assumptions.general.minimum_operating_pressure_pa < assumptions.general.pipeline_pressure_pa:
+            withdrawal_compression = calculate_compression(
+                CompressionInput(
+                    inlet_pressure_pa=assumptions.general.minimum_operating_pressure_pa,
+                    outlet_pressure_pa=assumptions.general.pipeline_pressure_pa,
+                    inlet_temperature_k=assumptions.general.temperature_k,
+                    mass_flow_kg_s=flows.withdrawal_flow_kg_per_s,
+                    method=assumptions.general.compression_method,
+                )
+        )
+    else:
+        withdrawal_compression = None
+
     #return fully defined storage project
     return StorageProject(
         technology=StorageTechnology.SALT_CAVERN,
@@ -190,5 +203,6 @@ def construct_project(
         salt_conversion_process=salt_conversion_process,
         porous_first_fill_process=None, #n/a for salt caverns
         compression=compression,
+        withdrawal_compression=withdrawal_compression if withdrawal_compression else None,
         purification=purification
     )

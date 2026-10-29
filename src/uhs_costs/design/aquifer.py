@@ -37,9 +37,9 @@ from uhs_costs.design.default_design_assumptions import HyStoriesDesignAssumptio
 ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.AQUIFER,
     general_overrides={
-        'reference_reservoir_depth_m': 1162, #from calibration script
-        'minimum_operating_pressure_pa': 118.59e5,  #from calibration script
-        'maximum_operating_pressure_pa': 143.67e5, #from calibration script
+        'reference_reservoir_depth_m': 720, #from reference_selection script
+        'minimum_operating_pressure_pa': 55e5,  #from reference_selection script
+        'maximum_operating_pressure_pa': 106e5, #from reference_selection script
         'abandonment_pressure_pa': 0,
     }
 )
@@ -141,6 +141,19 @@ def construct_project(
         )
     )
 
+    if assumptions.general.minimum_operating_pressure_pa < assumptions.general.pipeline_pressure_pa:
+        withdrawal_compression = calculate_compression(
+            CompressionInput(
+                inlet_pressure_pa=assumptions.general.minimum_operating_pressure_pa,
+                outlet_pressure_pa=assumptions.general.pipeline_pressure_pa,
+                inlet_temperature_k=assumptions.general.temperature_k,
+                mass_flow_kg_s=flows.withdrawal_flow_kg_per_s,
+                method=assumptions.general.compression_method,
+            )
+    )
+    else:
+        withdrawal_compression = None
+    
     #return fully defined storage project
     return StorageProject(
         technology=StorageTechnology.AQUIFER,
@@ -156,5 +169,6 @@ def construct_project(
         salt_conversion_process=None, #n/a for DGFs
         porous_first_fill_process=porous_first_fill_process, 
         compression=compression,
+        withdrawal_compression=withdrawal_compression if withdrawal_compression else None,
         purification=purification
     )

@@ -40,9 +40,9 @@ from uhs_costs.design.default_design_assumptions import HyStoriesDesignAssumptio
 ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.LINED_ROCK_CAVERN,
     general_overrides={
-        'reference_reservoir_depth_m': 150,
-        'minimum_operating_pressure_pa': 55e5,
-        'maximum_operating_pressure_pa': 200e5,
+        'reference_reservoir_depth_m': 150, # from reference_selection script
+        'minimum_operating_pressure_pa': 20e5, # from reference_selection script
+        'maximum_operating_pressure_pa': 150e5, # from reference_selection script
         'abandonment_pressure_pa': 0,
     }
 )
@@ -168,6 +168,19 @@ def construct_project(
         )
     )
 
+    if assumptions.general.minimum_operating_pressure_pa < assumptions.general.pipeline_pressure_pa:
+            withdrawal_compression = calculate_compression(
+                CompressionInput(
+                    inlet_pressure_pa=assumptions.general.minimum_operating_pressure_pa,
+                    outlet_pressure_pa=assumptions.general.pipeline_pressure_pa,
+                    inlet_temperature_k=assumptions.general.temperature_k,
+                    mass_flow_kg_s=flows.withdrawal_flow_kg_per_s,
+                    method=assumptions.general.compression_method,
+                )
+        )
+    else:
+        withdrawal_compression = None
+
     lrc_first_fill_process = construct_porous_first_fill_process(
         working_gas_volume_million_sm3=inventory.working_gas_h2_volume_sm3 / 1_000_000,
         cushion_gas_volume_million_sm3=inventory.cushion_gas_h2_volume_sm3  / 1_000_000,
@@ -193,5 +206,6 @@ def construct_project(
         lrc_lining=lrc_lining,
         lrc_drainage=lrc_drainage,
         compression=compression,
+        withdrawal_compression=withdrawal_compression if withdrawal_compression else None,
         purification=purification
     )

@@ -59,9 +59,11 @@ def calculate_surface_cost_components(
         material_cost_factor_injection=assumptions.material_cost_factor_injection,
     )
 
+    withdrawal_compresion_power_mw = project.withdrawal_compression.total_design_brake_power_kw / 1000 if project.withdrawal_compression else None
     surface_epc1_withdrawal = surface_capex.epc1_withdrawal_cost_eur(
         withdrawal_flow_million_sm3_per_day=gross_withdrawal_flow_million_sm3_per_day,
-        material_cost_factor_withdrawal=assumptions.material_cost_factor_withdrawal
+        material_cost_factor_withdrawal=assumptions.material_cost_factor_withdrawal,
+        total_installed_withdrawal_compression_brake_power_mw=( withdrawal_compresion_power_mw )
     )
 
     surface_epc1_fixed = surface_capex.epc1_fixed_cost_eur()

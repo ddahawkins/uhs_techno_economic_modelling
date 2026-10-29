@@ -46,6 +46,7 @@ class StorageProject:
     lrc_lining: LinedRockCavernLiningDesign | None = None
     lrc_drainage: LinedRockCavernDrainageDesign | None = None
     compression: CompressionResult | None = None
+    withdrawal_compression: CompressionResult | None = None
     purification: Purification | None = None
 
 

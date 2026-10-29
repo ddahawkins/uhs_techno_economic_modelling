@@ -46,6 +46,7 @@ def epc1_fixed_cost_eur() -> float:
 def epc1_withdrawal_cost_eur(
     withdrawal_flow_million_sm3_per_day: float,
     material_cost_factor_withdrawal: float,
+    total_installed_withdrawal_compression_brake_power_mw: float | None = None,
 ) -> float:
     """HyStories EPC1 withdrawal-flow-related component.
 
@@ -60,6 +61,19 @@ def epc1_withdrawal_cost_eur(
         * (1 + material_cost_factor_withdrawal * 0.11)
         * withdrawal_flow_million_sm3_per_day**0.643
     )
+
+    #Optional compression cost for withdrawal where pipeline pressure > min pressure
+    if total_installed_withdrawal_compression_brake_power_mw:
+        cost_keur += (
+                8655
+                * (1 + material_cost_factor_withdrawal * 0.14)
+                * total_installed_withdrawal_compression_brake_power_mw
+            )
+        print("additional withdrawal compression cost:", (
+                8655
+                * (1 + material_cost_factor_withdrawal * 0.14)
+                * total_installed_withdrawal_compression_brake_power_mw
+            ))
 
     return cost_keur * 1000
 
