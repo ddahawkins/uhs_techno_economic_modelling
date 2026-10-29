@@ -40,9 +40,9 @@ from uhs_costs.design.default_design_assumptions import HyStoriesDesignAssumptio
 ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.LINED_ROCK_CAVERN,
     general_overrides={
-        'reference_reservoir_depth_m': 150, # from reference_selection script
-        'minimum_operating_pressure_pa': 20e5, # from reference_selection script
-        'maximum_operating_pressure_pa': 150e5, # from reference_selection script
+        'reference_reservoir_depth_m': 115, # from reference_selection script
+        'minimum_operating_pressure_pa': 10e5, # from reference_selection script
+        'maximum_operating_pressure_pa': 230e5, # from reference_selection script
         'abandonment_pressure_pa': 0,
     }
 )
