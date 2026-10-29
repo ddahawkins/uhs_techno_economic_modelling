@@ -69,11 +69,6 @@ def epc1_withdrawal_cost_eur(
                 * (1 + material_cost_factor_withdrawal * 0.14)
                 * total_installed_withdrawal_compression_brake_power_mw
             )
-        print("additional withdrawal compression cost:", (
-                8655
-                * (1 + material_cost_factor_withdrawal * 0.14)
-                * total_installed_withdrawal_compression_brake_power_mw
-            ))
 
     return cost_keur * 1000
 
