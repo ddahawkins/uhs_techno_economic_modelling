@@ -12,11 +12,11 @@ low/default/high interpretation is meaningful. Reservoir depth and three coupled
 absolute pressure level, operating pressure-ratio headroom, and (DGF only)
 abandonment fraction. Every pressure screen preserves pressure ordering.
 
-Documented reservoir configurations are evaluated separately from the OAT screen.
-They are loaded from ``RESERVOIR_SAMPLES_CSV`` and applied as coupled site cases
-(e.g. depth + minimum pressure + maximum pressure + abandonment pressure). This
-preserves observed/site-specific combinations without forcing them into an
-artificial low/default/high ordering.
+Documented site configurations are evaluated separately from the OAT screen.
+They are loaded from ``RESERVOIR_SAMPLES_CSV`` for DGF, SA, SC and LRC, using
+each eligible site's own hydrogen working capacity and coupled depth/pressures.
+EPR and WTIR remain fixed by storage technology. Incomplete/invalid site rows
+are documented in the results rather than silently filled with defaults.
 
 Each enabled ``SensitivitySpec`` defines a low and high factor case around an
 explicit reference/default case. For every applicable technology the ordinary
@@ -56,6 +56,7 @@ outputs/cost_sensitivity/
     figures/
         tcr_sensitivity_ranges.pdf
         reservoir_sample_tcr_rates.pdf
+        site_tcr_spectrum_by_technology.pdf
 
 Run from the repository root, e.g.::
 
@@ -71,9 +72,10 @@ Notes
 * Changing reservoir depth, either in the OAT screen or a reservoir-sample
   case, recalculates reservoir temperature using the same screening-level
   geothermal relationship used by the design assumptions.
-* LRC minimum storage pressure is coupled to the pipeline-pressure factor rather
-  than to LRC depth because the current assumption treats it as a network-
-  interface requirement rather than a geomechanical depth constraint.
+* The broad factor screens retain their separately specified pressure-coordinate
+  baselines. The site sweep preserves documented pressures, including LRC sites
+  below the pipeline interface; its comparison baseline uses the selected
+  reference site's geological configuration at the candidate's own capacity.
 * Compressor efficiency/design-margin sensitivities are intentionally not
   implemented because those parameters remain internal defaults of
   ``CompressionInput`` rather than exposed project assumptions.
@@ -140,16 +142,26 @@ OUTPUT_RESULTS_CSV = OUTPUT_DIR / "sensitivity_results.csv"
 OUTPUT_SPEC_CSV = OUTPUT_DIR / "sensitivity_specification.csv"
 OUTPUT_RESERVOIR_SAMPLE_RESULTS_CSV = OUTPUT_DIR / "reservoir_sample_results.csv"
 FIGURE_DIR = OUTPUT_DIR / "figures"
+OUTPUT_SITE_SPECTRUM_PDF = FIGURE_DIR / "site_tcr_spectrum_by_technology.pdf"
 
-# Empirical/site-specific reservoir configurations. The CSV is intentionally
-# separate from the low/default/high sensitivity registry. Add future SC/LRC
-# rows by using storage_class=SC or storage_class=LRC and populating whichever
-# of the recognised reservoir columns are applicable.
-RESERVOIR_SAMPLES_CSV = Path("data/resources/porous_media_reservoir_pressure_profiles.csv")
+# Empirical/site-specific configurations, including DGF/SA/SC/LRC. Unlike the
+# factor screening, this site sweep uses each site's documented H2 capacity.
+# Rows without a complete site design are retained in the CSV as diagnostics.
+RESERVOIR_SAMPLES_CSV = Path("data/resources/uhs_reference_sites.csv")
 RUN_RESERVOIR_SAMPLE_SWEEP = True
 RUN_RESERVOIR_STORAGE_CLASSES: tuple[str, ...] | None = None
 RUN_RESERVOIR_SITES: tuple[str, ...] | None = None
-RESERVOIR_SAMPLE_SORT: Literal["input", "site", "storage_tcr"] = "input"
+RESERVOIR_SAMPLE_SORT: Literal["input", "Site", "storage_tcr"] = "input"
+
+# Selected ECONOMIC medoids from reference_selection. These are expected to
+# appear among the costable site rows; a missing medoid is an explicit error.
+# Update here if the selected references change.
+SELECTED_ECONOMIC_MEDOIDS = {
+    "depleted_gas_field": "Sabbioncello",
+    "aquifer": "Gournay Sur Aronde",
+    "salt_cavern": "Manosque",
+    "lined_rock_cavern": "Skallen",
+}
 
 RUN_TECHNOLOGIES = (
     "salt_cavern",
@@ -303,9 +315,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
 ALL_TECHS = tuple(spec.technology for spec in TECHNOLOGIES)
 POROUS_TECHS = ("depleted_gas_field", "aquifer")
 
-# External reservoir-sample class labels -> internal technology keys. This is
-# deliberately extensible so the same CSV-driven sweep can later include salt
-# caverns and lined-rock caverns without changing the execution logic.
+# External site-class labels -> internal technology keys.
 RESERVOIR_STORAGE_CLASS_TO_TECHNOLOGY: dict[str, str] = {
     "DGF": "depleted_gas_field",
     "SA": "aquifer",
@@ -313,13 +323,23 @@ RESERVOIR_STORAGE_CLASS_TO_TECHNOLOGY: dict[str, str] = {
     "LRC": "lined_rock_cavern",
 }
 
-# CSV column -> (GeneralDesignAssumptions field, input scale). Blank cells are
-# simply ignored, which lets different storage classes provide different subsets.
-RESERVOIR_SAMPLE_PARAMETER_MAP: dict[str, tuple[str, float]] = {
-    "depth_m_representative": ("reference_reservoir_depth_m", 1.0),
-    "model_abandonment_pressure_bar": ("abandonment_pressure_pa", 1e5),
-    "min_storage_pressure_bar": ("minimum_operating_pressure_pa", 1e5),
-    "max_storage_pressure_bar": ("maximum_operating_pressure_pa", 1e5),
+# Site-reference geological defaults are deliberately independent of the older
+# broad-factor sensitivity registry; that registry can be recalibrated later.
+# Abandonment pressure is relevant to DGF only.
+RESERVOIR_SAMPLE_REFERENCE_DESIGNS: dict[str, dict[str, float]] = {
+    "depleted_gas_field": {"reference_reservoir_depth_m": 1100.,
+                           "minimum_operating_pressure_pa": 77.4e5,
+                           "maximum_operating_pressure_pa": 142.2e5,
+                           "abandonment_pressure_pa": 68.65e5},
+    "aquifer": {"reference_reservoir_depth_m": 720.,
+                "minimum_operating_pressure_pa": 55e5,
+                "maximum_operating_pressure_pa": 106e5},
+    "salt_cavern": {"reference_reservoir_depth_m": 1000.,
+                    "minimum_operating_pressure_pa": 60e5,
+                    "maximum_operating_pressure_pa": 190e5},
+    "lined_rock_cavern": {"reference_reservoir_depth_m": 115.,
+                          "minimum_operating_pressure_pa": 10e5,
+                          "maximum_operating_pressure_pa": 230e5},
 }
 
 
@@ -1437,7 +1457,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
         note=(
             "Excavation/mining cost is varied by +/-50% around the indexed "
             "reference to test the sensitivity of the engineered-cavern cost to "
-            "site- and market-dependent underground construction costs."
+            "Site- and market-dependent underground construction costs."
         ),
     ),
     SensitivitySpec(
@@ -1600,9 +1620,53 @@ def parse_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     text = str(value).strip()
-    if not text:
+    if not text or text.lower() in {"n/a", "na", "nan", "null", "none", "-", "--", "**"}:
         return None
-    return float(text)
+    return float(text.replace(",", ""))
+
+
+def site_numeric_inputs(sample: Mapping[str, Any]) -> dict[str, float | None]:
+    """Parse the current site schema; never invent missing physical inputs."""
+    minimum = parse_optional_float(sample.get("Min. Op. Pressure"))
+    if minimum is None:
+        minimum = parse_optional_float(sample.get("Minimum pressure bar"))
+    return {
+        "E_gwh": parse_optional_float(sample.get("H2 reference working GWh")),
+        "depth_m": parse_optional_float(sample.get("Reference depth m")),
+        "pmin_bar": minimum,
+        "pmax_bar": parse_optional_float(sample.get("Maximum pressure bar")),
+        "pab_bar": parse_optional_float(sample.get("Abandonment pressure bar")),
+    }
+
+
+def site_exclusion_reason(sample: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Return a recorded exclusion; missing data are not model failures."""
+    try:
+        inputs = site_numeric_inputs(sample)
+    except (ValueError, TypeError) as exc:
+        return "invalid", f"Unparseable numeric site input: {exc}"
+    required = ("E_gwh", "depth_m", "pmin_bar", "pmax_bar")
+    if str(sample["technology"]) == "depleted_gas_field":
+        required += ("pab_bar",)
+    missing = [name for name in required if inputs[name] is None]
+    if missing:
+        return "incomplete", "Missing required site inputs: " + ", ".join(missing)
+    assert all(inputs[name] is not None for name in required)
+    if not all(math.isfinite(float(inputs[name])) for name in required):
+        return "invalid", "Nonfinite numeric site input"
+    if inputs["E_gwh"] <= 0 or inputs["depth_m"] <= 0:
+        return "invalid", "Nonpositive H2 capacity or reservoir depth"
+    try:
+        validate_pressures(
+            str(sample["technology"]),
+            float(inputs["pmin_bar"]) * 1e5,
+            float(inputs["pmax_bar"]) * 1e5,
+            (float(inputs["pab_bar"]) * 1e5
+             if str(sample["technology"]) == "depleted_gas_field" else None),
+        )
+    except ValueError as exc:
+        return "invalid", str(exc)
+    return None
 
 
 def reservoir_storage_class_to_technology(storage_class: str) -> str:
@@ -1635,7 +1699,9 @@ def load_reservoir_samples(
         if reader.fieldnames is None:
             raise ValueError(f"Reservoir-sample CSV has no header: {path}")
 
-        required = {"storage_class", "site"}
+        required = {"Storage class", "Site", "H2 reference working GWh",
+                    "Reference depth m", "Min. Op. Pressure",
+                    "Maximum pressure bar", "Abandonment pressure bar"}
         missing = required - set(reader.fieldnames)
         if missing:
             raise ValueError(
@@ -1644,8 +1710,8 @@ def load_reservoir_samples(
 
         rows: list[dict[str, Any]] = []
         for input_index, source_row in enumerate(reader):
-            storage_class = str(source_row.get("storage_class", "")).strip().upper()
-            site = str(source_row.get("site", "")).strip()
+            storage_class = str(source_row.get("Storage class", "")).strip().upper()
+            site = str(source_row.get("Site", "")).strip()
             if not storage_class or not site:
                 continue
 
@@ -1658,8 +1724,8 @@ def load_reservoir_samples(
                 continue
 
             row = dict(source_row)
-            row["storage_class"] = storage_class
-            row["site"] = site
+            row["Storage class"] = storage_class
+            row["Site"] = site
             row["technology"] = reservoir_storage_class_to_technology(storage_class)
             row["_input_index"] = input_index
             rows.append(row)
@@ -2010,55 +2076,34 @@ def build_reservoir_sample_configuration(
 ) -> tuple[Any, dict[str, object] | None, dict[str, object] | None, str]:
     """Apply one documented reservoir configuration to the paper reference case.
 
-    Only non-blank recognised CSV columns are applied. Depth changes trigger the
-    same geothermal temperature update as the ordinary sensitivity machinery.
-    A zero abandonment pressure on a technology whose general assumptions do not
-    expose that field is treated as a benign 'not applicable' convention.
+    Apply a fully documented site's jointly specified depth and pressures. The
+    candidate's own H2 capacity is handled by construct_reference_project().
     """
 
     assumptions, hystories_overrides, lrc_overrides = build_case_configuration(
         technology
     )
-    general = assumptions.general
-    applied: list[str] = []
-    depth_changed = False
-
-    for csv_column, (parameter, scale) in RESERVOIR_SAMPLE_PARAMETER_MAP.items():
-        value = parse_optional_float(sample.get(csv_column))
-        if value is None:
-            continue
-
-        if parameter not in dataclass_field_names(general):
-            # SA/SC/LRC rows may use zero purely as a 'not applicable' marker.
-            if csv_column == "model_abandonment_pressure_bar" and is_close(value, 0.0):
-                continue
-            raise AttributeError(
-                f"{technology.technology}: reservoir sample {sample.get('site')!r} "
-                f"supplies {csv_column!r}, but {type(general).__name__} has no "
-                f"field {parameter!r}."
-            )
-
-        internal_value = value * scale
-        general = replace(general, **{parameter: internal_value})
-        applied.append(f"{parameter}={value:g}{' bar' if scale == 1e5 else ' m'}")
-        depth_changed = depth_changed or parameter == "reference_reservoir_depth_m"
-
-    if not applied:
-        raise ValueError(
-            f"Reservoir sample {sample.get('site')!r} contains no recognised numeric "
-            "reservoir parameters."
-        )
-
-    if depth_changed and "temperature_k" in dataclass_field_names(general):
-        general = replace(
-            general,
-            temperature_k=calculate_temperature_from_depth_k(
-                float(general.reference_reservoir_depth_m)
-            ),
-        )
-
+    exclusion = site_exclusion_reason(sample)
+    if exclusion is not None:
+        raise ValueError(f"{exclusion[0]}: {exclusion[1]}")
+    values = site_numeric_inputs(sample)
+    depth = float(values["depth_m"])
+    updates = {
+        "reference_reservoir_depth_m": depth,
+        "minimum_operating_pressure_pa": float(values["pmin_bar"]) * 1e5,
+        "maximum_operating_pressure_pa": float(values["pmax_bar"]) * 1e5,
+        "temperature_k": calculate_temperature_from_depth_k(depth),
+    }
+    if technology.technology == "depleted_gas_field":
+        updates["abandonment_pressure_pa"] = float(values["pab_bar"]) * 1e5
+    general = replace(assumptions.general, **updates)
     assumptions = replace(assumptions, general=general)
-    return assumptions, hystories_overrides, lrc_overrides, "; ".join(applied)
+    description = (f"E={float(values['E_gwh']):g} GWh; depth={depth:g} m; "
+                   f"Pmin={float(values['pmin_bar']):g} bar; "
+                   f"Pmax={float(values['pmax_bar']):g} bar")
+    if technology.technology == "depleted_gas_field":
+        description += f"; Pab={float(values['pab_bar']):g} bar"
+    return assumptions, hystories_overrides, lrc_overrides, description
 
 
 def sensitivity_case_definition(
@@ -2099,12 +2144,17 @@ def sensitivity_case_definition(
 def construct_reference_project(
     technology: TechnologySpec,
     design_assumptions: Any,
+    capacity_gwh_lhv: float | None = None,
 ) -> Any:
-    withdrawal_kw, injection_kw = derive_reference_flows(technology)
+    capacity_gwh = (technology.default_storage_capacity_gwh_lhv
+                    if capacity_gwh_lhv is None else capacity_gwh_lhv)
+    if not math.isfinite(capacity_gwh) or capacity_gwh <= 0:
+        raise ValueError(f"Invalid site/reference H2 capacity: {capacity_gwh}")
+    capacity_kwh = capacity_gwh * 1_000_000.0
+    withdrawal_kw = capacity_kwh / (technology.default_epr_days * 24.0)
+    injection_kw = withdrawal_kw / technology.default_wtir
     return technology.project_constructor(
-        working_gas_capacity_kwh_lhv=(
-            technology.default_storage_capacity_gwh_lhv * 1_000_000.0
-        ),
+        working_gas_capacity_kwh_lhv=capacity_kwh,
         withdrawal_flow_kw_h2_lhv=withdrawal_kw,
         injection_flow_kw_h2_lhv=injection_kw,
         assumptions=design_assumptions,
@@ -2539,7 +2589,6 @@ def _sample_metadata(sample: Mapping[str, Any]) -> dict[str, Any]:
 def run_reservoir_sample_case(
     sample: Mapping[str, Any],
     technology: TechnologySpec,
-    baseline: dict[str, Any],
 ) -> dict[str, Any]:
     (
         design_assumptions,
@@ -2548,10 +2597,9 @@ def run_reservoir_sample_case(
         sample_definition,
     ) = build_reservoir_sample_configuration(technology, sample)
 
-    project = construct_reference_project(
-        technology,
-        design_assumptions=design_assumptions,
-    )
+    E_gwh = float(site_numeric_inputs(sample)["E_gwh"])
+    project = construct_reference_project(technology, design_assumptions,
+                                          capacity_gwh_lhv=E_gwh)
     breakdown = calculate_cost_breakdown(
         technology,
         project,
@@ -2561,24 +2609,51 @@ def run_reservoir_sample_case(
     rates = summarise_tcr_rates(breakdown)
     total_tcr = total_project_tcr_eur(breakdown)
 
+    # Compare with the selected reference geological configuration at the same
+    # E/EPR/WTIR. Otherwise a site's scale would dominate total-cost changes.
+    base_design, base_cost_overrides, base_lrc_overrides = (
+        build_case_configuration(technology)
+    )
+    base_geology = RESERVOIR_SAMPLE_REFERENCE_DESIGNS[technology.technology]
+    base_depth = float(base_geology["reference_reservoir_depth_m"])
+    base_general = replace(
+        base_design.general,
+        **base_geology,
+        temperature_k=calculate_temperature_from_depth_k(base_depth),
+    )
+    base_design = replace(base_design, general=base_general)
+    base_project = construct_reference_project(
+        technology, base_design, capacity_gwh_lhv=E_gwh,
+    )
+    base_breakdown = calculate_cost_breakdown(
+        technology, base_project,
+        hystories_overrides=base_cost_overrides,
+        lrc_overrides=base_lrc_overrides,
+    )
+    base_rates = summarise_tcr_rates(base_breakdown)
+    base_tcr = total_project_tcr_eur(base_breakdown)
+
     row: dict[str, Any] = {
         **_sample_metadata(sample),
         "technology": technology.technology,
         "technology_label": technology.label,
         "sample_definition": sample_definition,
+        "site_capacity_gwh": E_gwh,
+        "epr_days": technology.default_epr_days,
+        "wtir": technology.default_wtir,
         "status": "ok",
         "error": "",
         "total_project_tcr_eur": total_tcr,
-        "total_project_default_tcr_eur": baseline["total_tcr_eur"],
+        "total_project_default_tcr_eur": base_tcr,
         "total_project_tcr_change_pct": (
-            100.0 * (total_tcr / baseline["total_tcr_eur"] - 1.0)
+            100.0 * (total_tcr / base_tcr - 1.0)
         ),
     }
 
     for group in COMPONENT_GROUPS:
         key = group.lower()
         rate = rates[group]
-        base_rate = baseline["rates"][group]
+        base_rate = base_rates[group]
         row[f"{key}_tcr_rate"] = rate
         row[f"{key}_default_tcr_rate"] = base_rate
         row[f"{key}_tcr_change_pct"] = (
@@ -2606,9 +2681,21 @@ def failed_reservoir_sample_row(
     }
 
 
-def run_reservoir_sample_experiment(
-    baselines: Mapping[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
+def excluded_reservoir_sample_row(
+    sample: Mapping[str, Any],
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        **_sample_metadata(sample),
+        "technology": sample["technology"],
+        "sample_definition": "",
+        "status": status,
+        "error": reason,
+    }
+
+
+def run_reservoir_sample_experiment() -> list[dict[str, Any]]:
     if not RUN_RESERVOIR_SAMPLE_SWEEP:
         return []
 
@@ -2623,19 +2710,20 @@ def run_reservoir_sample_experiment(
             continue
 
         technology = tech_by_name[technology_name]
+        exclusion = site_exclusion_reason(sample)
+        if exclusion is not None:
+            rows.append(excluded_reservoir_sample_row(sample, *exclusion))
+            continue
         print(
-            f"reservoir sample: {technology.label}: {sample['site']}",
+            f"reservoir sample: {technology.label}: {sample['Site']}",
             flush=True,
         )
         try:
             row = run_reservoir_sample_case(
                 sample,
                 technology,
-                baselines[technology_name],
             )
         except Exception as exc:
-            if FAIL_FAST:
-                raise
             print(f"  FAILED -> {type(exc).__name__}: {exc}")
             row = failed_reservoir_sample_row(sample, technology, exc)
         rows.append(row)
@@ -2964,7 +3052,7 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
     if len(techs) == 1:
         offsets = {techs[0].technology: 0.0}
     else:
-        jitter = np.linspace(-0.24, 0.24, len(techs))
+        jitter = np.linspace(-0, 0, len(techs))
         offsets = {
             spec.technology: float(offset)
             for spec, offset in zip(techs, jitter, strict=True)
@@ -3135,11 +3223,11 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
 
 
 def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
-    """Plot every documented reservoir sample using absolute component TCR rates.
+    """Plot costable sites from all four technologies using component TCR rates.
 
-    Each row is a site. The coloured circle is the site-specific configuration;
-    the vertical tick is the ordinary paper reference case for that technology.
-    Failed/infeasible samples remain visible as labelled rows.
+    Each circle is a candidate design. The tick is the selected reference
+    geological design evaluated at that candidate's H2 working capacity.
+    Incomplete/invalid rows remain in the diagnostic CSV, not the plot.
     """
 
     if not rows:
@@ -3147,22 +3235,29 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
 
     tech_order = {spec.technology: i for i, spec in enumerate(TECHNOLOGIES)}
     input_order = {
-        (row.get("technology"), row.get("site")): i
+        (row.get("technology"), row.get("Site")): i
         for i, row in enumerate(rows)
     }
 
     def sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         tech = str(row.get("technology", ""))
         base = (tech_order.get(tech, 999),)
-        if RESERVOIR_SAMPLE_SORT == "site":
-            return base + (str(row.get("site", "")).lower(),)
+        if RESERVOIR_SAMPLE_SORT == "Site":
+            return base + (str(row.get("Site", "")).lower(),)
         if RESERVOIR_SAMPLE_SORT == "storage_tcr":
             value = row.get("storage_tcr_rate")
             numeric = float(value) if value is not None else float("inf")
-            return base + (numeric, str(row.get("site", "")).lower())
-        return base + (input_order.get((tech, row.get("site")), 999999),)
+            return base + (numeric, str(row.get("Site", "")).lower())
+        return base + (input_order.get((tech, row.get("Site")), 999999),)
 
-    plot_rows = sorted(rows, key=sort_key)
+    # Excluded records remain in the diagnostic CSV but have no cost coordinate.
+    # Plotting all incomplete rows would produce a huge mostly-empty figure.
+    plot_rows = sorted(
+        (row for row in rows if row.get("status") in {"ok", "failed"}),
+        key=sort_key,
+    )
+    if not plot_rows:
+        return
     n = len(plot_rows)
     colours = technology_colours()
 
@@ -3228,7 +3323,7 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
             )
 
     labels = [
-        f"{row.get('site', '')} [{row.get('storage_class', row.get('technology', ''))}]"
+        f"{row.get('Site', '')} [{row.get('Storage class', row.get('technology', ''))}]"
         for row in plot_rows
     ]
     axes[0].set_yticks(y_positions)
@@ -3289,7 +3384,7 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
             marker="o",
             linestyle="None",
             markersize=4.5,
-            label="Reservoir sample",
+            label="Site sample",
         ),
         Line2D(
             [0],
@@ -3299,7 +3394,7 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
             linestyle="None",
             markersize=8,
             markeredgewidth=1.2,
-            label="Paper reference",
+            label="Reference design at same capacity",
         ),
     ]
 
@@ -3311,7 +3406,7 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
         frameon=False,
         fontsize=7.5,
     )
-    fig.suptitle("TCR rates across documented reservoir configurations", y=0.995)
+    fig.suptitle("TCR rates across documented site configurations", y=0.995)
     fig.subplots_adjust(
         left=0.30,
         right=0.99,
@@ -3320,6 +3415,141 @@ def plot_reservoir_sample_tcr_rates(rows: list[dict[str, Any]]) -> None:
         wspace=0.12,
     )
     fig.savefig(FIGURE_DIR / "reservoir_sample_tcr_rates.pdf")
+    plt.close(fig)
+
+
+def plot_site_tcr_spectrum_by_technology(rows: list[dict[str, Any]]) -> None:
+    """One row per technology: all site rates, range, and selected medoid.
+
+    All input rates come from the costed site rows, which already use each
+    site's own H2 working capacity. No common-capacity normalisation is applied
+    in this figure. The connecting segment is the observed min-max sample span,
+    not an estimate of the population's distribution.
+    """
+    if not rows:
+        return
+
+    order = ("depleted_gas_field", "aquifer", "salt_cavern",
+             "lined_rock_cavern")
+    selected = {tech.technology: tech for tech in selected_technology_specs()}
+    technologies = [selected[name] for name in order if name in selected]
+    by_technology: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row.get("status") == "ok":
+            by_technology[str(row["technology"])].append(row)
+
+    medoid_rows: dict[str, dict[str, Any]] = {}
+    for technology in technologies:
+        samples = by_technology[technology.technology]
+        if not samples:
+            raise ValueError(
+                f"No costable samples for {technology.label}; check "
+                f"{OUTPUT_RESERVOIR_SAMPLE_RESULTS_CSV}"
+            )
+        chosen = SELECTED_ECONOMIC_MEDOIDS[technology.technology].casefold()
+        matches = [row for row in samples
+                   if str(row.get("Site", "")).strip().casefold() == chosen]
+        if len(matches) != 1:
+            raise ValueError(
+                f"{technology.label}: selected economic medoid "
+                f"{SELECTED_ECONOMIC_MEDOIDS[technology.technology]!r} "
+                f"has {len(matches)} costable rows (expected exactly one). "
+                f"Review the sample CSV and selection."
+            )
+        medoid_rows[technology.technology] = matches[0]
+
+    metrics = (
+        ("injection_tcr_rate", "Injection", "TCR [EUR/kW]"),
+        ("storage_tcr_rate", "Storage", "TCR [EUR/kWh]"),
+        ("withdrawal_tcr_rate", "Withdrawal", "TCR [EUR/kW]"),
+    )
+    colours = technology_colours()
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 5.2), sharey=True)
+    y_positions = np.arange(len(technologies), dtype=float)
+
+    for ax, (metric, title, xlabel) in zip(axes, metrics, strict=True):
+        all_values: list[float] = []
+        for y, technology in zip(y_positions, technologies, strict=True):
+            name = technology.technology
+            samples = by_technology[name]
+            colour = colours[name]
+            ordered_samples = sorted(
+                samples, key=lambda row: (float(row[metric]), str(row["Site"]))
+            )
+            values = np.array([float(row[metric]) for row in ordered_samples])
+            if not np.all(np.isfinite(values)) or np.any(values <= 0):
+                raise ValueError(f"{technology.label}: invalid {metric} sample rates")
+            all_values.extend(values.tolist())
+
+            # A single horizontal range segment plus dots for every site.
+            # ax.hlines(y, float(values.min()), float(values.max()),
+            #           color=colour, linewidth=2.2, alpha=0.72, zorder=1)
+
+            medoid = medoid_rows[name]
+            selected_rate = float(medoid[metric])
+            reference_value = selected_rate / selected_rate
+            ax.scatter([selected_rate], [y], s=80,
+                       color=colour, edgecolors="black", linewidths=0.4,
+                       zorder=5)
+
+            normalised_values = values / selected_rate
+
+            mean = np.mean(values)
+            median = np.median(values)
+
+            offsets = np.linspace(-0.0, 0.0, len(values))
+            ax.scatter(values, y + offsets, s=60, color="white",
+                        edgecolors=colour, linewidths=0.4,
+                        alpha=0.8, zorder=2)
+
+            ax.scatter([median], [y], s=200, color="black", marker="|",
+                                    edgecolors='black', linewidths=2, 
+                                    alpha=0.8, zorder=2)
+            
+            # One readable callout per technology, in the centre panel. The
+            # same diamond indicates the medoid in the other two panels.
+            if metric == "storage_tcr_rate":
+                ax.annotate(
+                    str(medoid["Site"]), xy=(selected_rate, y),
+                    xytext=(11, -15 if y % 2 == 0 else 13),
+                    textcoords="offset points", fontsize=10,
+                    ha="left", va="center",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                              ec=colour, lw=0.8, alpha=0.96),
+                    arrowprops=dict(arrowstyle="-", color=colour, lw=0.75),
+                    zorder=6,
+                )
+
+        ax.set_title(title, fontsize=11, pad=13)
+        ax.set_xlabel(xlabel, fontsize=10)
+        ax.grid(axis="x", alpha=0.25, linewidth=0.65)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="x", labelsize=8.5)
+        # ax.set_xlim(0, max(all_values) * (1.55 if metric == "storage_tcr_rate" else 1.12))
+
+    axes[0].set_yticks(y_positions)
+    axes[0].set_yticklabels(
+        [f"{tech.label}\n(n={len(by_technology[tech.technology])})"
+         for tech in technologies], fontsize=9,
+    )
+    axes[0].invert_yaxis()
+    axes[0].tick_params(axis="y", length=0)
+    for ax in axes:
+        ax.set_ylim(len(technologies) - 0.45, -0.55)
+
+    legend = (
+        Line2D([0], [0], color="white", marker="o", linestyle="-", markeredgecolor="black",
+               markersize=10, linewidth=2, label="Candidate sites"),
+        Line2D([0], [0], color="dimgrey", marker="o", linewidth=0, markeredgecolor="black",
+              markersize=10, label="Selected Reference"),
+        Line2D([0], [0], color="black", marker="|", linewidth=0, markeredgewidth=2,markeredgecolor="black",
+                markersize=10, label="Category Median"),
+    )
+    fig.legend(handles=legend, loc="lower center", ncol=3,
+               bbox_to_anchor=(0.5, 0.05), frameon=False, fontsize=10)
+    fig.subplots_adjust(left=0.205, right=0.99, top=0.84,
+                        bottom=0.22, wspace=0.16)
+    fig.savefig(OUTPUT_SITE_SPECTRUM_PDF, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -3363,9 +3593,12 @@ def print_reservoir_sample_summary(rows: list[dict[str, Any]]) -> None:
     tech_by_name = {spec.technology: spec for spec in TECHNOLOGIES}
     for technology, members in by_technology.items():
         ok = [row for row in members if row.get("status") == "ok"]
-        failed = [row for row in members if row.get("status") != "ok"]
+        failed = [row for row in members if row.get("status") == "failed"]
+        incomplete = [row for row in members if row.get("status") == "incomplete"]
+        invalid = [row for row in members if row.get("status") == "invalid"]
         label = tech_by_name[technology].label
-        print(f"{label}: {len(ok)} successful, {len(failed)} failed")
+        print(f"{label}: {len(ok)} costed, {len(incomplete)} incomplete, "
+              f"{len(invalid)} invalid, {len(failed)} model failures")
         if ok:
             changes = [float(row["total_project_tcr_change_pct"]) for row in ok]
             print(
@@ -3373,7 +3606,9 @@ def print_reservoir_sample_summary(rows: list[dict[str, Any]]) -> None:
                 f"{min(changes):.1f}% to {max(changes):.1f}%"
             )
         for row in failed:
-            print(f"  FAILED {row.get('site')}: {row.get('error')}")
+            print(f"  FAILED {row.get('Site')}: {row.get('error')}")
+        for row in invalid:
+            print(f"  INVALID {row.get('Site')}: {row.get('error')}")
 
 
 # =============================================================================
@@ -3561,10 +3796,11 @@ def main() -> None:
     plot_tcr_sensitivity_ranges(rows)
     print_screening_summary(rows)
 
-    reservoir_rows = run_reservoir_sample_experiment(baselines)
+    reservoir_rows = run_reservoir_sample_experiment()
     if reservoir_rows:
         write_csv(OUTPUT_RESERVOIR_SAMPLE_RESULTS_CSV, reservoir_rows)
         plot_reservoir_sample_tcr_rates(reservoir_rows)
+        plot_site_tcr_spectrum_by_technology(reservoir_rows)
         print_reservoir_sample_summary(reservoir_rows)
 
     print("\nSaved:")
@@ -3574,6 +3810,15 @@ def main() -> None:
     if reservoir_rows:
         print(f"  {OUTPUT_RESERVOIR_SAMPLE_RESULTS_CSV}")
         print(f"  {FIGURE_DIR / 'reservoir_sample_tcr_rates.pdf'}")
+        print(f"  {OUTPUT_SITE_SPECTRUM_PDF}")
+
+    failed_site_cases = [row for row in reservoir_rows
+                         if row.get("status") in {"failed", "invalid"}]
+    if FAIL_FAST and failed_site_cases:
+        raise RuntimeError(
+            f"{len(failed_site_cases)} invalid/failed site configurations; "
+            f"inspect {OUTPUT_RESERVOIR_SAMPLE_RESULTS_CSV}"
+        )
 
 
 if __name__ == "__main__":
