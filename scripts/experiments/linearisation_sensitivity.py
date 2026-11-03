@@ -119,20 +119,24 @@ RUN_SENSITIVITIES = (
     "epr_days",
     "wtir",
 )
+PLOT_SENSITIVITIES = (
+    "epr_days",
+    "wtir",
+)
 
 # Common normalised design-point sweep for both E and EPR.
 #
 # The same multipliers are used for every technology, which makes the x-axis
 # directly comparable across technologies. The corresponding absolute E and EPR
 # values are still written to the CSV.
-DESIGN_POINT_MULTIPLIERS = np.linspace(0.1,2,20) 
+DESIGN_POINT_MULTIPLIERS = np.linspace(0.5,1.5,11) 
 
 # WTIR is deliberately kept in its natural units rather than normalised.
-WTIR_SWEEP = (1.0, 2.0, 3.0, 4.0, 5.0)
+WTIR_SWEEP = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
 
 # Figure switches make it easy to suppress one output during development.
 PLOT_COMPONENT_RATE_FACTORS = True
-PLOT_TOTAL_ERROR = True
+PLOT_TOTAL_ERROR = False
 
 
 @dataclass(frozen=True)
@@ -888,12 +892,12 @@ def plot_component_rate_factors(
     """
 
     specs = get_selected_specs()
-    sensitivities = tuple(RUN_SENSITIVITIES)
+    sensitivities = tuple(PLOT_SENSITIVITIES)
 
     fig, axes = plt.subplots(
         nrows=len(COMPONENT_GROUPS),
         ncols=len(sensitivities),
-        figsize=(12, 9),
+        figsize=(9, 8),
         squeeze=False,
         sharex="col",
         sharey=True
@@ -978,7 +982,7 @@ def plot_total_linearisation_error(
     """Plot one compact 1 x 3 figure of total-project linearisation error."""
 
     specs = get_selected_specs()
-    sensitivities = tuple(RUN_SENSITIVITIES)
+    sensitivities = tuple(PLOT_SENSITIVITIES)
 
     fig, axes = plt.subplots(
         nrows=1,
@@ -1057,7 +1061,7 @@ def plot_total_linearisation_error(
 
     fig.suptitle("Total-project linearisation error", y=1.03)
     fig.tight_layout(rect=(0, 0.10, 1, 1))
-    save_figure(fig, figure_dir / "total_linearisation_error")
+    # save_figure(fig, figure_dir / "total_linearisation_error")
 
 
 # =============================================================================
@@ -1086,6 +1090,1196 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
 
 
 # =============================================================================
+# Linear versus affine cost representation
+# =============================================================================
+
+RUN_COST_FIT_ANALYSIS = True
+
+COST_FIT_RESULTS_CSV = OUTPUT_DIR / "linear_cost_fit_results.csv"
+
+# The restricted domain tests accuracy around the calibration design.
+COST_FIT_LOCAL_MIN = 0.5
+COST_FIT_LOCAL_MAX = 1.5
+COST_FIT_LOCAL_WTIR_MIN = 1.0
+COST_FIT_LOCAL_WTIR_MAX = 3.0
+
+
+def get_unique_cost_cases(
+    rows: list[dict[str, Any]],
+    technology: str,
+    component_group: str,
+    domain: str,
+) -> list[dict[str, Any]]:
+    """Retrieve distinct facility designs for cost fitting.
+
+    The original experiment repeats the reference configuration in
+    the E, EPR and WTIR sweeps. These duplicates are removed to avoid
+    giving the reference configuration artificial statistical weight.
+    """
+
+    representative_group = (
+        "Injection" if component_group == "Total" else component_group
+    )
+
+    selected = []
+    seen = set()
+
+    key_fields = (
+        "storage_capacity_gwh_lhv",
+        "injection_flow_gw_h2_lhv",
+        "withdrawal_flow_gw_h2_lhv",
+    )
+
+    for row in rows:
+        if row["technology"] != technology:
+            continue
+
+        if row["component_group"] != representative_group:
+            continue
+
+        if domain == "near_reference":
+            e_factor = float(row["storage_capacity_factor"])
+            epr_factor = float(row["epr_factor"])
+            wtir = float(row["wtir"])
+
+            if not (
+                COST_FIT_LOCAL_MIN <= e_factor <= COST_FIT_LOCAL_MAX
+                and COST_FIT_LOCAL_MIN <= epr_factor <= COST_FIT_LOCAL_MAX
+                and COST_FIT_LOCAL_WTIR_MIN
+                <= wtir
+                <= COST_FIT_LOCAL_WTIR_MAX
+            ):
+                continue
+
+        key = tuple(
+            round(float(row[field]), 8)
+            for field in key_fields
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        selected.append(row)
+
+    return selected
+
+
+def get_fit_target(
+    rows: list[dict[str, Any]],
+    component_group: str,
+) -> np.ndarray:
+    """Return detailed absolute TCR in MEUR."""
+
+    field = (
+        "detailed_total_tcr_meur"
+        if component_group == "Total"
+        else "detailed_component_tcr_meur"
+    )
+
+    return np.asarray(
+        [float(row[field]) for row in rows],
+        dtype=float,
+    )
+
+
+def get_reference_lp_prediction(
+    rows: list[dict[str, Any]],
+    component_group: str,
+) -> np.ndarray:
+    """Return costs predicted using existing reference CEM coefficients."""
+
+    field = (
+        "default_linearised_total_tcr_meur"
+        if component_group == "Total"
+        else "default_linearised_component_tcr_meur"
+    )
+
+    return np.asarray(
+        [float(row[field]) for row in rows],
+        dtype=float,
+    )
+
+
+def get_fit_model_definitions(
+    component_group: str,
+) -> list[tuple[str, tuple[str, ...], bool]]:
+    """Define alternative cost representations.
+
+    Entries contain:
+        model name,
+        capacity drivers,
+        whether a constant intercept is included.
+
+    E is in GWh, power in GW, and costs in MEUR.
+
+    Consequently:
+        MEUR/GWh = EUR/kWh
+        MEUR/GW  = EUR/kW
+    """
+
+    E = "storage_capacity_gwh_lhv"
+    P_IN = "injection_flow_gw_h2_lhv"
+    P_OUT = "withdrawal_flow_gw_h2_lhv"
+
+    if component_group == "Injection":
+        own_driver = (P_IN,)
+        coupled_drivers = (E, P_IN)
+
+    elif component_group == "Storage":
+        own_driver = (E,)
+        coupled_drivers = (E, P_OUT)
+
+    elif component_group == "Withdrawal":
+        own_driver = (P_OUT,)
+        coupled_drivers = (E, P_OUT)
+
+    elif component_group == "Total":
+        own_driver = ()
+        coupled_drivers = (E, P_IN, P_OUT)
+
+    else:
+        raise KeyError(component_group)
+
+    models = [
+        ("reference_lp", (), False),
+    ]
+
+    if component_group != "Total":
+        models.append(
+            ("single_driver_lp", own_driver, False)
+        )
+
+    models.extend(
+        [
+            ("coupled_lp", coupled_drivers, False),
+            ("affine", coupled_drivers, True),
+        ]
+    )
+
+    return models
+
+
+def build_fit_matrix(
+    rows: list[dict[str, Any]],
+    drivers: tuple[str, ...],
+    include_intercept: bool,
+) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Build the regression design matrix."""
+
+    columns = []
+
+    if include_intercept:
+        columns.append(
+            np.ones(len(rows), dtype=float)
+        )
+
+    for driver in drivers:
+        columns.append(
+            np.asarray(
+                [float(row[driver]) for row in rows],
+                dtype=float,
+            )
+        )
+
+    X = np.column_stack(columns)
+
+    names = (
+        ("intercept",) + drivers
+        if include_intercept
+        else drivers
+    )
+
+    return X, names
+
+
+def fit_linear_cost_model(
+    X: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Ordinary least squares with column scaling.
+
+    Scaling improves numerical conditioning because storage capacities
+    in GWh can be much larger numerically than power capacities in GW.
+    """
+
+    column_scales = np.linalg.norm(X, axis=0)
+
+    column_scales = np.where(
+        column_scales > 0,
+        column_scales,
+        1.0,
+    )
+
+    X_scaled = X / column_scales
+
+    coefficients_scaled, *_ = np.linalg.lstsq(
+        X_scaled,
+        y,
+        rcond=None,
+    )
+
+    return coefficients_scaled / column_scales
+
+
+def leave_one_out_predictions(
+    X: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Calculate leave-one-design-point-out predictions."""
+
+    predictions = np.full(len(y), np.nan)
+
+    for index in range(len(y)):
+        mask = np.ones(len(y), dtype=bool)
+        mask[index] = False
+
+        X_train = X[mask]
+        y_train = y[mask]
+
+        if np.linalg.matrix_rank(X_train) < X.shape[1]:
+            continue
+
+        coefficients = fit_linear_cost_model(
+            X_train,
+            y_train,
+        )
+
+        predictions[index] = (
+            X[index] @ coefficients
+        )
+
+    return predictions
+
+
+def calculate_fit_metrics(
+    y: np.ndarray,
+    predicted: np.ndarray,
+) -> dict[str, float]:
+    """Calculate absolute and relative prediction errors."""
+
+    valid = (
+        np.isfinite(y)
+        & np.isfinite(predicted)
+        & (np.abs(y) > 1e-12)
+    )
+
+    if not np.any(valid):
+        return {
+            "mae_pct": float("nan"),
+            "median_abs_pct": float("nan"),
+            "max_abs_pct": float("nan"),
+            "rmse_pct": float("nan"),
+        }
+
+    actual = y[valid]
+    fitted = predicted[valid]
+
+    relative_error_pct = (
+        100.0 * (fitted - actual) / actual
+    )
+
+    return {
+        "mae_pct": float(
+            np.mean(np.abs(relative_error_pct))
+        ),
+        "median_abs_pct": float(
+            np.median(np.abs(relative_error_pct))
+        ),
+        "max_abs_pct": float(
+            np.max(np.abs(relative_error_pct))
+        ),
+        "rmse_pct": float(
+            np.sqrt(np.mean(relative_error_pct**2))
+        ),
+    }
+
+
+def run_cost_fit_analysis(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compare reference, refitted-linear and affine TCR models.
+
+    The fits are diagnostic. Coefficients should not be inserted into
+    the CEM without checking physical signs, baseline calibration
+    accuracy and out-of-sample performance.
+    """
+
+    results = []
+
+    domains = ("full", "near_reference")
+
+    groups = (
+        "Injection",
+        "Storage",
+        "Withdrawal",
+        "Total",
+    )
+
+    for spec in get_selected_specs():
+        for domain in domains:
+            for group in groups:
+
+                cases = get_unique_cost_cases(
+                    rows,
+                    technology=spec.technology,
+                    component_group=group,
+                    domain=domain,
+                )
+
+                if not cases:
+                    continue
+
+                y = get_fit_target(cases, group)
+
+                reference_index = next(
+                    (
+                        i
+                        for i, case in enumerate(cases)
+                        if str(
+                            case["is_default_case"]
+                        ).lower() in {"true", "1"}
+                    ),
+                    None,
+                )
+
+                models = get_fit_model_definitions(group)
+
+                for model_name, drivers, has_intercept in models:
+
+                    coefficients = {}
+                    coefficient_names = ()
+                    negative_slopes = False
+
+                    if model_name == "reference_lp":
+                        predicted = get_reference_lp_prediction(
+                            cases,
+                            group,
+                        )
+
+                        cv_predicted = predicted.copy()
+
+                    else:
+                        X, coefficient_names = build_fit_matrix(
+                            cases,
+                            drivers,
+                            has_intercept,
+                        )
+
+                        if (
+                            len(y) <= X.shape[1]
+                            or np.linalg.matrix_rank(X)
+                            < X.shape[1]
+                        ):
+                            continue
+
+                        beta = fit_linear_cost_model(X, y)
+
+                        predicted = X @ beta
+
+                        cv_predicted = leave_one_out_predictions(
+                            X,
+                            y,
+                        )
+
+                        coefficients = dict(
+                            zip(
+                                coefficient_names,
+                                beta,
+                                strict=True,
+                            )
+                        )
+
+                        negative_slopes = any(
+                            float(value) < -1e-9
+                            for name, value in coefficients.items()
+                            if name != "intercept"
+                        )
+
+                    metrics = calculate_fit_metrics(
+                        y,
+                        predicted,
+                    )
+
+                    cv_metrics = calculate_fit_metrics(
+                        y,
+                        cv_predicted,
+                    )
+
+                    if reference_index is None:
+                        reference_error_pct = float("nan")
+                    else:
+                        reference_error_pct = (
+                            100.0
+                            * (
+                                predicted[reference_index]
+                                - y[reference_index]
+                            )
+                            / y[reference_index]
+                        )
+
+                    result = {
+                        "technology": spec.technology,
+                        "technology_label": spec.label,
+                        "component_group": group,
+                        "domain": domain,
+                        "model": model_name,
+                        "number_cases": len(cases),
+
+                        "intercept_meur": coefficients.get(
+                            "intercept", 0.0
+                        ),
+
+                        "storage_coefficient_eur_per_kwh": (
+                            coefficients.get(
+                                "storage_capacity_gwh_lhv",
+                                0.0,
+                            )
+                        ),
+
+                        "injection_coefficient_eur_per_kw": (
+                            coefficients.get(
+                                "injection_flow_gw_h2_lhv",
+                                0.0,
+                            )
+                        ),
+
+                        "withdrawal_coefficient_eur_per_kw": (
+                            coefficients.get(
+                                "withdrawal_flow_gw_h2_lhv",
+                                0.0,
+                            )
+                        ),
+
+                        "reference_cost_meur": (
+                            float(y[reference_index])
+                            if reference_index is not None
+                            else None
+                        ),
+
+                        "reference_error_pct": reference_error_pct,
+
+                        "mae_pct": metrics["mae_pct"],
+                        "median_abs_pct": metrics["median_abs_pct"],
+                        "max_abs_pct": metrics["max_abs_pct"],
+                        "rmse_pct": metrics["rmse_pct"],
+
+                        "loocv_mae_pct": cv_metrics["mae_pct"],
+                        "loocv_median_abs_pct": (
+                            cv_metrics["median_abs_pct"]
+                        ),
+                        "loocv_max_abs_pct": (
+                            cv_metrics["max_abs_pct"]
+                        ),
+
+                        "negative_capacity_coefficient": (
+                            negative_slopes
+                        ),
+                    }
+
+                    results.append(result)
+
+    return results
+
+
+def plot_cost_fit_comparison(
+    fit_results: list[dict[str, Any]],
+    figure_dir: Path,
+) -> None:
+    """Compare total-project prediction errors across model types."""
+
+    specs = get_selected_specs()
+
+    models = (
+        "reference_lp",
+        "coupled_lp",
+        "affine",
+    )
+
+    labels = {
+        "reference_lp": "Reference LP",
+        "coupled_lp": "Refitted LP",
+        "affine": "Affine",
+    }
+
+    domains = (
+        "near_reference",
+        "full",
+    )
+
+    lookup = {
+        (
+            row["technology"],
+            row["component_group"],
+            row["domain"],
+            row["model"],
+        ): row
+        for row in fit_results
+    }
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(12, 4.5),
+        sharey=False,
+    )
+
+    x = np.arange(len(specs))
+    width = 0.24
+
+    for ax, domain in zip(axes, domains, strict=True):
+
+        for model_index, model in enumerate(models):
+            values = []
+
+            for spec in specs:
+                result = lookup.get(
+                    (
+                        spec.technology,
+                        "Total",
+                        domain,
+                        model,
+                    )
+                )
+
+                values.append(
+                    float(result["loocv_median_abs_pct"])
+                    if result is not None
+                    else np.nan
+                )
+
+            ax.bar(
+                x + (model_index - 1) * width,
+                values,
+                width,
+                label=labels[model],
+            )
+
+        ax.set_xticks(
+            x,
+            [spec.label for spec in specs],
+            rotation=20,
+            ha="right",
+        )
+
+        ax.set_ylabel(
+            "Median absolute prediction error [%]"
+        )
+
+        ax.set_title(
+            "Near reference"
+            if domain == "near_reference"
+            else "Full design range"
+        )
+
+        ax.grid(
+            axis="y",
+            alpha=0.3,
+            linewidth=0.5,
+        )
+
+        ax.set_axisbelow(True)
+
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+
+    fig.legend(
+        handles,
+        legend_labels,
+        loc="upper center",
+        ncol=3,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.03),
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+
+    save_figure(
+        fig,
+        figure_dir / "linear_cost_fit_comparison",
+    )
+
+def plot_withdrawal_cost_model_comparison(
+    rows: list[dict[str, Any]],
+    figure_dir: Path,
+) -> None:
+    """Compare linear cost representations for withdrawal TCR.
+
+    Fits use both working-gas capacity and EPR sensitivities.
+    The figure displays predictions along the EPR sensitivity.
+
+    Models:
+      - Constant reference unit rate
+      - Cross-driver linear cost: a*P_out + b*E
+      - Affine cost: F + a*P_out + b*E
+    """
+
+    specs = get_selected_specs()
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(10, 7),
+        sharex=True,
+    )
+
+    axes = axes.flatten()
+
+    for ax, spec in zip(axes, specs):
+
+        # Data to display: EPR variation.
+        epr_rows = get_rows(
+            rows,
+            sensitivity="epr_days",
+            technology=spec.technology,
+            component_group="Withdrawal",
+        )
+
+        # Additional data needed to identify the E coefficient.
+        capacity_rows = get_rows(
+            rows,
+            sensitivity="storage_capacity_gwh_lhv",
+            technology=spec.technology,
+            component_group="Withdrawal",
+        )
+
+        # Fit to both sensitivities, not only the displayed EPR sweep.
+        fit_rows = epr_rows + capacity_rows
+
+        # Remove duplicated design configurations.
+        unique = {}
+
+        for row in fit_rows:
+
+            E = float(row["storage_capacity_gwh_lhv"]) * 1e6
+            P = float(row["withdrawal_flow_gw_h2_lhv"]) * 1e6
+
+            key = (round(E), round(P))
+            unique[key] = row
+
+        fit_rows = list(unique.values())
+
+        # Reference capacities.
+        E0 = spec.default_storage_capacity_gwh_lhv * 1e6
+        P0 = E0 / (spec.default_epr_days * 24.0)
+
+        # Normalised regression drivers.
+        X = np.array([
+            [
+                float(r["withdrawal_flow_gw_h2_lhv"]) * 1e6 / P0,
+                float(r["storage_capacity_gwh_lhv"]) * 1e6 / E0,
+            ]
+            for r in fit_rows
+        ])
+
+        # Detailed withdrawal investment cost, MEUR.
+        y = np.array([
+            float(r["detailed_component_tcr_meur"])
+            for r in fit_rows
+        ])
+
+        # ---------------------------------------------------------
+        # Reference-anchored cross-driver regression
+        # ---------------------------------------------------------
+
+        # Identify the reference design.
+        reference_row = min(
+            epr_rows,
+            key=lambda r: abs(float(r["epr_factor"]) - 1.0),
+        )
+
+        # Reference withdrawal expenditure, MEUR.
+        C0 = float(
+            reference_row["detailed_component_tcr_meur"]
+        )
+
+        # X already contains:
+        # Column 0: P_out / P_out,0
+        # Column 1: E / E_0
+        p = X[:, 0]
+        e = X[:, 1]
+
+        # Fit:
+        # C = beta_P * p + beta_E * e
+        #
+        # Subject to:
+        # beta_P + beta_E = C0
+        #
+        # Substitute beta_P = C0 - beta_E:
+        # C = C0*p + beta_E*(e-p)
+
+        z = e - p
+
+        beta_E = np.dot(
+            z,
+            y - C0 * p,
+        ) / np.dot(z, z)
+
+        beta_P = C0 - beta_E
+
+        beta_coupled = np.array([
+            beta_P,
+            beta_E,
+        ])
+
+        # Verify exact reproduction of the reference design.
+        assert np.isclose(
+            beta_coupled.sum(),
+            C0,
+            rtol=1e-10,
+        )
+
+        # Affine model, with intercept.
+        X_affine = np.column_stack([
+            np.ones(len(X)),
+            X,
+        ])
+
+        beta_affine = np.linalg.lstsq(
+            X_affine, y, rcond=None
+        )[0]
+
+        # Predict on the displayed EPR sweep.
+        E_plot = np.array([
+            float(r["storage_capacity_gwh_lhv"]) * 1e6
+            for r in epr_rows
+        ])
+
+        P_plot = np.array([
+            float(r["withdrawal_flow_gw_h2_lhv"]) * 1e6
+            for r in epr_rows
+        ])
+
+        x_plot = np.array([
+            float(r["epr_factor"])
+            for r in epr_rows
+        ])
+
+        observed = np.array([
+            float(r["tcr_rate"])
+            for r in epr_rows
+        ])
+
+        X_plot = np.column_stack([
+            P_plot / P0,
+            E_plot / E0,
+        ])
+
+        # Predicted absolute costs (MEUR).
+        cost_coupled = X_plot @ beta_coupled
+
+        cost_affine = (
+            np.column_stack([
+                np.ones(len(X_plot)),
+                X_plot,
+            ])
+            @ beta_affine
+        )
+
+        # Convert predicted costs to withdrawal EUR/kW.
+        rate_coupled = cost_coupled * 1e6 / P_plot
+        rate_affine = cost_affine * 1e6 / P_plot
+
+        # Constant reference rate.
+        reference_rate = float(
+            epr_rows[0]["default_linearised_tcr_rate"]
+        )
+
+        rate_constant = np.full_like(
+            x_plot,
+            reference_rate,
+        )
+
+        # ---------------------------------------------------------
+        # Plot
+        # ---------------------------------------------------------
+
+        ax.plot(
+            x_plot,
+            observed,
+            "ko",
+            markersize=4,
+            label="Detailed model",
+            zorder=5,
+        )
+
+        ax.plot(
+            x_plot,
+            rate_constant,
+            color="0.5",
+            linestyle="--",
+            linewidth=1.7,
+            label="Constant unit rate",
+        )
+
+        ax.plot(
+            x_plot,
+            rate_coupled,
+            color="tab:blue",
+            linewidth=2,
+            label="Cross-driver linear",
+        )
+
+        ax.plot(
+            x_plot,
+            rate_affine,
+            color="tab:orange",
+            linestyle=":",
+            linewidth=2,
+            label="Affine",
+        )
+
+        ax.axvline(
+            1.0,
+            color="0.7",
+            linestyle=":",
+            linewidth=0.8,
+        )
+
+        ax.set_title(spec.label)
+        ax.set_xlabel("EPR / reference EPR [-]")
+        ax.set_ylabel("Withdrawal TCR [EUR/kW]")
+        ax.grid(alpha=0.25)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.02),
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+
+    save_figure(
+        fig,
+        figure_dir / "withdrawal_cost_model_comparison",
+    )
+
+
+def plot_injection_cost_model_comparison(
+    rows: list[dict[str, Any]],
+    figure_dir: Path,
+) -> None:
+    """Compare linear cost representations for withdrawal TCR.
+
+    Fits use both working-gas capacity and EPR sensitivities.
+    The figure displays predictions along the EPR sensitivity.
+
+    Models:
+      - Constant reference unit rate
+      - Cross-driver linear cost: a*P_out + b*E
+      - Affine cost: F + a*P_out + b*E
+    """
+
+    specs = get_selected_specs()
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(10, 7),
+        sharex=True,
+    )
+
+    axes = axes.flatten()
+
+    for ax, spec in zip(axes, specs):
+
+        # Data to display: EPR variation.
+        wtir_rows = get_rows(
+            rows,
+            sensitivity="wtir",
+            technology=spec.technology,
+            component_group="Injection",
+        )
+
+        # Fit to both sensitivities, not only the displayed EPR sweep.
+        fit_rows = []
+        for sensitivity in (
+            "storage_capacity_gwh_lhv",
+            "epr_days",
+            "wtir",
+        ):
+            fit_rows.extend(
+                get_rows(
+                    rows,
+                    sensitivity=sensitivity,
+                    technology=spec.technology,
+                    component_group="Injection",
+                )
+            )
+
+        # Remove duplicated design configurations.
+        unique = {}
+
+        for row in fit_rows:
+
+            E = float(row["storage_capacity_gwh_lhv"]) * 1e6
+
+            P_in = float(
+                row["injection_flow_gw_h2_lhv"]
+            ) * 1e6
+
+            P_out = float(
+                row["withdrawal_flow_gw_h2_lhv"]
+            ) * 1e6
+
+            key = (
+                round(E),
+                round(P_in),
+                round(P_out),
+            )
+
+            unique[key] = row
+
+        fit_rows = list(unique.values())
+
+        # Reference capacities.
+        E0 = spec.default_storage_capacity_gwh_lhv * 1e6
+
+        P_out0 = E0 / (spec.default_epr_days * 24.0)
+
+        P0 = P_out0 / spec.default_wtir
+
+        # Normalised regression drivers.
+        X = np.array([
+            [
+                float(r["injection_flow_gw_h2_lhv"]) * 1e6 / P0,
+                float(r["storage_capacity_gwh_lhv"]) * 1e6 / E0,
+            ]
+            for r in fit_rows
+        ])
+
+        # Detailed withdrawal investment cost, MEUR.
+        y = np.array([
+            float(r["detailed_component_tcr_meur"])
+            for r in fit_rows
+        ])
+
+        # ---------------------------------------------------------
+        # Reference-anchored cross-driver regression
+        # ---------------------------------------------------------
+
+        # Identify the reference design.
+        reference_row = min(
+            wtir_rows,
+            key=lambda r: abs(
+                float(r["wtir"]) - spec.default_wtir
+            ),
+        )
+
+        # Reference withdrawal expenditure, MEUR.
+        C0 = float(
+            reference_row["detailed_component_tcr_meur"]
+        )
+
+        # X already contains:
+        # Column 0: P_out / P_out,0
+        # Column 1: E / E_0
+        p = X[:, 0]
+        e = X[:, 1]
+
+        # Fit:
+        # C = beta_P * p + beta_E * e
+        #
+        # Subject to:
+        # beta_P + beta_E = C0
+        #
+        # Substitute beta_P = C0 - beta_E:
+        # C = C0*p + beta_E*(e-p)
+
+        z = e - p
+
+        beta_E = np.dot(
+            z,
+            y - C0 * p,
+        ) / np.dot(z, z)
+
+        beta_P = C0 - beta_E
+
+        beta_coupled = np.array([
+            beta_P,
+            beta_E,
+        ])
+
+        # Verify exact reproduction of the reference design.
+        assert np.isclose(
+            beta_coupled.sum(),
+            C0,
+            rtol=1e-10,
+        )
+
+        # Affine model, with intercept.
+        X_affine = np.column_stack([
+            np.ones(len(X)),
+            X,
+        ])
+
+        beta_affine = np.linalg.lstsq(
+            X_affine, y, rcond=None
+        )[0]
+
+        # Predict on the displayed EPR sweep.
+        E_plot = np.array([
+            float(r["storage_capacity_gwh_lhv"]) * 1e6
+            for r in wtir_rows
+        ])
+
+        P_plot = np.array([
+            float(r["injection_flow_gw_h2_lhv"]) * 1e6
+            for r in wtir_rows
+        ])
+
+        x_plot = np.array([
+            float(r["wtir"])
+            for r in wtir_rows
+        ])
+
+        observed = np.array([
+            float(r["tcr_rate"])
+            for r in wtir_rows
+        ])
+
+        X_plot = np.column_stack([
+            P_plot / P0,
+            E_plot / E0,
+        ])
+
+        # Predicted absolute costs (MEUR).
+        cost_coupled = X_plot @ beta_coupled
+
+        cost_affine = (
+            np.column_stack([
+                np.ones(len(X_plot)),
+                X_plot,
+            ])
+            @ beta_affine
+        )
+
+        # Convert predicted costs to withdrawal EUR/kW.
+        rate_coupled = cost_coupled * 1e6 / P_plot
+        rate_affine = cost_affine * 1e6 / P_plot
+
+        # Constant reference rate.
+        reference_rate = float(
+            wtir_rows[0]["default_linearised_tcr_rate"]
+        )
+
+        rate_constant = np.full_like(
+            x_plot,
+            reference_rate,
+        )
+
+        # ---------------------------------------------------------
+        # Plot
+        # ---------------------------------------------------------
+
+        ax.plot(
+            x_plot,
+            observed,
+            "ko",
+            markersize=4,
+            label="Detailed model",
+            zorder=5,
+        )
+
+        ax.plot(
+            x_plot,
+            rate_constant,
+            color="0.5",
+            linestyle="--",
+            linewidth=1.7,
+            label="Constant unit rate",
+        )
+
+        ax.plot(
+            x_plot,
+            rate_coupled,
+            color="tab:blue",
+            linewidth=2,
+            label="Cross-driver linear",
+        )
+
+        ax.plot(
+            x_plot,
+            rate_affine,
+            color="tab:orange",
+            linestyle=":",
+            linewidth=2,
+            label="Affine",
+        )
+
+        ax.axvline(
+            spec.default_wtir,
+            color="0.7",
+            linestyle=":",
+            linewidth=0.8,
+        )
+
+        ax.set_title(spec.label)
+        ax.set_xlabel("Withdrawal-to-injection ratio [-]")
+        ax.set_ylabel("Injection TCR [EUR/kW]")
+        ax.grid(alpha=0.25)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.02),
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+
+    save_figure(
+        fig,
+        figure_dir / "injection_cost_model_comparison",
+    )
+
+
+def print_cost_fit_summary(
+    fit_results: list[dict[str, Any]],
+) -> None:
+    """Print diagnostic results for the total-project cost models."""
+
+    print("\nLINEAR COST REPRESENTATION COMPARISON")
+    print("-------------------------------------")
+
+    for spec in get_selected_specs():
+        print(f"\n{spec.label}")
+
+        for domain in ("near_reference", "full"):
+            print(f"  {domain}:")
+
+            selected = [
+                row
+                for row in fit_results
+                if row["technology"] == spec.technology
+                and row["component_group"] == "Total"
+                and row["domain"] == domain
+            ]
+
+            for row in selected:
+                print(
+                    f"    {row['model']:<20} "
+                    f"LOOCV median error="
+                    f"{row['loocv_median_abs_pct']:.2f}%  "
+                    f"max={row['loocv_max_abs_pct']:.2f}%  "
+                    f"F={row['intercept_meur']:.2f} MEUR"
+                )
+
+                if row["negative_capacity_coefficient"]:
+                    print(
+                        "      WARNING: One or more fitted capacity "
+                        "coefficients are negative."
+                    )
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -1101,6 +2295,31 @@ def main() -> None:
 
     print_summary(rows)
 
+    if RUN_COST_FIT_ANALYSIS:
+        fit_results = run_cost_fit_analysis(rows)
+
+        write_rows_to_csv(
+            fit_results,
+            COST_FIT_RESULTS_CSV,
+        )
+
+        plot_cost_fit_comparison(
+            fit_results,
+            FIGURE_DIR,
+        )
+
+        print_cost_fit_summary(fit_results)
+
+        plot_withdrawal_cost_model_comparison(
+            rows,
+            FIGURE_DIR,
+        )
+
+        plot_injection_cost_model_comparison(
+            rows,
+            FIGURE_DIR,
+        )
+    
     print(f"\nSaved results: {OUTPUT_CSV}")
     print(f"Saved figures: {FIGURE_DIR}")
 
