@@ -699,7 +699,7 @@ def main() -> None:
     )
     dgf_cost_breakdown = calculate_depleted_gas_field_cost_components(dgf_project)
 
-    salt_cavern_scale = 1_064_730_000 #kWh
+    salt_cavern_scale = 1_773_490_000 #kWh
     salt_cavern_project = construct_salt_cavern_project(
         working_gas_capacity_kwh_lhv=salt_cavern_scale,
         withdrawal_flow_kw_h2_lhv=salt_cavern_scale/(24*12),

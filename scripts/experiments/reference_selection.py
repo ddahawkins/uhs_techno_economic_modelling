@@ -9,6 +9,10 @@ Design and economic medoids are observed cases, not synthetic
 averages. Site coverage is not an availability-weighted European asset census.
 Missing capacities/pressures are never silently imputed; hydrogen volume
 equivalents from natural-gas working volume are not validated H2 capacities.
+By default, minimum pressures come from the reported source column. The
+``--min-pressure-source operating`` option restores the earlier operating-
+pressure column (with a reported-pressure fallback) for comparison; it does
+not itself clip any value to pipeline pressure.
 The synthetic design averages each source parameter independently, so partially
 documented facilities contribute only to the parameters they report. It is a
 comparison case, not a physically verified storage-site configuration.
@@ -24,6 +28,8 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+MIN_PRESSURE_SOURCES = ("reported", "operating")
 
 CLASSES = ("DGF", "SA", "SC", "LRC")
 TECHS = {"DGF": "depleted_gas_field", "SA": "aquifer",
@@ -46,6 +52,13 @@ DESIGN_RANGES = {
     "LRC": ((5., 7.5, 10.), (1., 2., 3.)),
 }
 
+# Porous-media wellfield assumptions
+DEFAULT_PRODUCTION_WELLS = 24
+DEFAULT_OBSERVATION_WELLS = 6
+
+# Disable to reproduce the original fixed-well-count analysis
+USE_REPORTED_SITE_WELL_COUNTS = True
+
 # Reference settings from the old exogenous cost-sensitivity registry. The
 # paired site depth/pressures override the geological defaults afterwards.
 GENERAL_ALL = {"pipeline_pressure_pa": 55e5,
@@ -61,12 +74,12 @@ GENERAL_BY_CLASS = {
     "LRC": {"recovery_factor": 1.},
 }
 TECHNOLOGY_BY_CLASS = {
-    "DGF": {"number_production_well_heads": 24,
-            "number_observation_well_heads": 6},
-    "SA": {"number_production_well_heads": 24,
-           "number_observation_well_heads": 6},
+    "DGF": {"number_production_well_heads": DEFAULT_PRODUCTION_WELLS,
+            "number_observation_well_heads": DEFAULT_OBSERVATION_WELLS},
+    "SA": {"number_production_well_heads": DEFAULT_PRODUCTION_WELLS,
+           "number_observation_well_heads": DEFAULT_OBSERVATION_WELLS},
     "SC": {"working_gas_volume_per_cavern_sm3": 31.25e6,
-           "maximum_withdrawal_flow_per_cavern_million_sm3_per_day": 2.8,
+           "maximum_withdrawal_flow_per_cavern_million_sm3_per_day": 2.79,
            "fresh_water_pipeline_length_km": 15.,
            "brine_disposal_pipeline_length_km": 30.,
            "debrining_flowrate_per_cavern_m3_per_hour": 200.,
@@ -113,6 +126,8 @@ class Site:
     notes: str
     min_source: str
     raw_pmin_bar: float | None = None
+    number_production_wells: int | None = None
+    number_observation_wells: int | None = None
 
     def vector(self) -> tuple[float, ...]:
         # The site configuration includes scale as well as geological properties.
@@ -134,8 +149,28 @@ def number(value: str | None) -> float | None:
         raise ValueError(f"Nonfinite numeric CSV value {value!r}")
     return val
 
+def well_count(value: str | None) -> int | None:
+    """Read an optional positive integer well count."""
+    text = (value or "").strip()
 
-def read_sites(path: Path) -> list[Site]:
+    if text.lower() in {"", "na", "n/a", "nan", "none", "-", "--"}:
+        return None
+
+    parsed = number(text)
+
+    if parsed is None:
+        return None
+
+    if parsed <= 0 or not parsed.is_integer():
+        raise ValueError(
+            f"Expected a positive whole-number well count, got {value!r}"
+        )
+
+    return int(parsed)
+
+def read_sites(path: Path, min_pressure_source: str = "reported") -> list[Site]:
+    if min_pressure_source not in MIN_PRESSURE_SOURCES:
+        raise ValueError(f"Unknown minimum-pressure source: {min_pressure_source!r}")
     if not path.is_file():
         raise FileNotFoundError(path)
     sites = []
@@ -148,14 +183,20 @@ def read_sites(path: Path) -> list[Site]:
             if cls not in CLASSES:
                 raise ValueError(f"CSV row {i}: unknown class {cls!r}")
             explicit_min = number(row["Minimum pressure bar"])
-            chosen_min = number(row["Min. Op. Pressure"])
-            if chosen_min is None:
+            operating_min = number(row["Min. Op. Pressure"])
+            if min_pressure_source == "reported":
                 chosen_min = explicit_min
-                source = "raw minimum; operating field unavailable"
-            elif explicit_min is None:
-                source = "operating field; raw minimum missing (potentially imputed)"
+                source = ("reported minimum pressure" if chosen_min is not None
+                          else "reported minimum missing; operating value not used")
+            elif operating_min is not None:
+                chosen_min = operating_min
+                source = ("operating minimum pressure (raw also available)"
+                          if explicit_min is not None
+                          else "operating minimum only (potentially imputed)")
             else:
-                source = "operating field; raw minimum also available"
+                chosen_min = explicit_min
+                source = ("reported minimum; operating field unavailable"
+                          if explicit_min is not None else "both minimum fields missing")
             sites.append(Site(
                 row_index=i, cls=cls, name=row["Site"].strip(),
                 country=row["Country"].strip(),
@@ -166,6 +207,8 @@ def read_sites(path: Path) -> list[Site]:
                 cavern_max_m3=number(row["Cavern volume maximum m3"]),
                 notes=row["Notes and sources"].strip(), min_source=source,
                 raw_pmin_bar=explicit_min,
+                number_production_wells=well_count(row["Number Production Wells"]),
+                number_observation_wells=well_count(row["Number Observation Wells"]),
             ))
     return sites
 
@@ -196,6 +239,7 @@ def site_issue(site: Site, min_lrc_volume: float) -> str:
 
 
 def site_fields(site: Site) -> dict[str, Any]:
+    well_counts = effective_site_wells(site)
     return {"storage_class": site.cls, "site": site.name,
             "country": site.country, "csv_row": site.row_index,
             "depth_m": site.depth_m,
@@ -204,7 +248,16 @@ def site_fields(site: Site) -> dict[str, Any]:
             "maximum_pressure_bar": site.pmax_bar,
             "E_gwh": site.h2_reference_gwh,
             "cavern_maximum_volume_m3": site.cavern_max_m3,
-            "min_pressure_source": site.min_source, "notes_and_sources": site.notes}
+            "min_pressure_source": site.min_source,
+            "notes_and_sources": site.notes,
+            "production_wells_reported": site.number_production_wells,
+            "observation_wells_reported": site.number_observation_wells,
+            "production_wells_applied": (
+                well_counts[0] if well_counts is not None else None
+            ),
+            "observation_wells_applied": (
+                well_counts[1] if well_counts is not None else None
+            )}
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
@@ -273,6 +326,29 @@ def component_rates(breakdown: Any) -> dict[str, float]:
     return dict(totals)
 
 
+def effective_site_wells(site: Site) -> tuple[int, int] | None:
+    """Return production and observation well counts for porous media."""
+
+    if site.cls not in {"DGF", "SA"}:
+        return None
+
+    if not USE_REPORTED_SITE_WELL_COUNTS:
+        return DEFAULT_PRODUCTION_WELLS, DEFAULT_OBSERVATION_WELLS
+
+    production = (
+        site.number_production_wells
+        if site.number_production_wells is not None
+        else DEFAULT_PRODUCTION_WELLS
+    )
+
+    observation = (
+        site.number_observation_wells
+        if site.number_observation_wells is not None
+        else DEFAULT_OBSERVATION_WELLS
+    )
+
+    return production, observation
+
 def model_costs(site: Site, models: dict, facility: tuple[float, float, float]) -> dict[str, float]:
     E_gwh, EPR_days, WTIR = facility
     if not (E_gwh > 0 and EPR_days > 0 and WTIR > 0):
@@ -289,10 +365,30 @@ def model_costs(site: Site, models: dict, facility: tuple[float, float, float]) 
         general_updates["abandonment_pressure_pa"] = site.abandonment_bar * 1e5
     # Fail fast if package field names changed: no silent loss of overrides.
     updated_general = replace(assumptions.general, **general_updates)
-    updated_tech = replace(assumptions.technology_specific,
-                           **TECHNOLOGY_BY_CLASS[site.cls])
-    updated_assumptions = replace(assumptions, general=updated_general,
-                                  technology_specific=updated_tech)
+
+    tech_updates = dict(TECHNOLOGY_BY_CLASS[site.cls])
+
+    # Apply empirical counts only for DGF and SA.
+    well_counts = effective_site_wells(site)
+
+    if well_counts is not None:
+        production_wells, observation_wells = well_counts
+
+        tech_updates.update({
+            "number_production_well_heads": production_wells,
+            "number_observation_well_heads": observation_wells,
+        })
+
+    updated_tech = replace(
+        assumptions.technology_specific,
+        **tech_updates
+    )
+
+    updated_assumptions = replace(
+        assumptions,
+        general=updated_general,
+        technology_specific=updated_tech,
+    )
     E_kwh = E_gwh * 1_000_000.
     withdrawal_kw = E_kwh / (EPR_days * 24.)
     injection_kw = withdrawal_kw / WTIR
@@ -398,12 +494,13 @@ def site_weights(sites: list[Site]) -> list[float]:
     return [1. / counts[key] for key in keys]
 
 
-def average_design(cls: str, sites: list[Site], min_lrc_volume: float
+def average_design(cls: str, sites: list[Site], min_lrc_volume: float,
+                   min_pressure_source: str = "reported"
                    ) -> tuple[Site, dict[str, int]]:
     """Mean each available source field, with one vote per distinct facility.
 
-    The population includes partially documented sites. For minimum pressure,
-    use only the *reported* minimum, not the 55-bar pipeline fallback. The
+    The population includes partially documented sites. Minimum pressure
+    follows the chosen source column; neither mode imposes a 55-bar uplift. The
     separate resulting means may not describe a real geological configuration;
     validate the combination before passing it to the cost model.
     """
@@ -412,7 +509,7 @@ def average_design(cls: str, sites: list[Site], min_lrc_volume: float
         and s.cavern_max_m3 < min_lrc_volume)]
     if not eligible:
         raise ValueError(f"No source sites for synthetic {cls} design")
-    fields = ("h2_reference_gwh", "depth_m", "raw_pmin_bar", "pmax_bar")
+    fields = ("h2_reference_gwh", "depth_m", "pmin_bar", "pmax_bar")
     if cls == "DGF":
         fields += ("abandonment_bar",)
     values: dict[str, float] = {}
@@ -437,11 +534,11 @@ def average_design(cls: str, sites: list[Site], min_lrc_volume: float
         row_index=0, cls=cls, name="Arithmetic mean (synthetic)",
         country="Synthetic comparison", depth_m=values["depth_m"],
         abandonment_bar=values.get("abandonment_bar"),
-        pmin_bar=values["raw_pmin_bar"], pmax_bar=values["pmax_bar"],
+        pmin_bar=values["pmin_bar"], pmax_bar=values["pmax_bar"],
         h2_reference_gwh=values["h2_reference_gwh"], cavern_max_m3=None,
         notes="Independent source-field arithmetic means; not a real site.",
-        min_source="Mean of reported minima only (no 55-bar fallback)",
-        raw_pmin_bar=values["raw_pmin_bar"],
+        min_source=f"Mean of {min_pressure_source} minima (no 55-bar uplift)",
+        raw_pmin_bar=values["pmin_bar"] if min_pressure_source == "reported" else None,
     )
     issue = site_issue(result, min_lrc_volume)
     if issue:
@@ -454,7 +551,7 @@ def average_design(cls: str, sites: list[Site], min_lrc_volume: float
 
 def evaluate_class(cls: str, sites: list[Site], models: dict,
                    quality: dict[int, dict], min_sites: int,
-                   min_lrc_volume: float,
+                   min_lrc_volume: float, min_pressure_source: str = "reported",
                    ) -> tuple[dict, list[dict], list[dict], list[Site], dict | None]:
     selected = [s for s in sites if s.cls == cls and not quality[s.row_index]["reason"]]
     successful: list[Site] = []
@@ -477,6 +574,7 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
         "n_distinct_facilities": n_groups,
         "n_model_failure": len(selected)-n, "minimum_cohort_size": min_sites,
         "capacity_basis": "site H2 reference working GWh (CSV)",
+        "minimum_pressure_basis": min_pressure_source,
         "min_E_gwh": min((s.h2_reference_gwh for s in successful), default=None),
         "max_E_gwh": max((s.h2_reference_gwh for s in successful), default=None),
         "EPR_days": REFERENCE_RATIOS[cls][0],
@@ -494,7 +592,9 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
     gscore = dict((i, score) for score, i in geo)
     escore = dict((i, score) for score, i in econ)
     medians = {c: weighted_median([r[c] for r in rates], weights) for c in COSTS}
-    synthetic_site, mean_counts = average_design(cls, sites, min_lrc_volume)
+    synthetic_site, mean_counts = average_design(
+        cls, sites, min_lrc_volume, min_pressure_source
+    )
     try:
         synthetic_rates = model_costs(synthetic_site, models,
                                       reference_facility(synthetic_site))
@@ -664,8 +764,11 @@ def main() -> None:
                         help="Minimum complete costed site count before reporting medoids")
     parser.add_argument("--min-lrc-cavern-m3", type=float, default=5000.,
                         help="Exclude demonstrator-sized LRC pilot caverns")
+    parser.add_argument("--min-pressure-source", choices=MIN_PRESSURE_SOURCES,
+                        default="reported",
+                        help="Minimum pressure basis: raw reported field (default), or earlier Min. Op. Pressure with raw fallback")
     parser.add_argument("--require-raw-pmin", action="store_true",
-                        help="Exclude rows whose minimum operating pressure exists only as an inferred value")
+                        help="Exclude rows with no explicit reported minimum pressure, including in operating mode")
     parser.add_argument("--sweep-points", type=int, default=9)
     parser.add_argument("--validate-only", action="store_true",
                         help="Validate and tabulate CSV without importing uhs_costs")
@@ -677,20 +780,22 @@ def main() -> None:
     args = parser.parse_args()
     if args.min_sites < 3 or args.sweep_points < 3 or args.min_lrc_cavern_m3 <= 0:
         parser.error("Need min-sites >=3, sweep-points >=3, LRC cavern threshold >0")
-    sites = [s for s in read_sites(args.input) if s.cls in args.classes]
+    sites = [s for s in read_sites(args.input, args.min_pressure_source)
+             if s.cls in args.classes]
     if not sites:
         raise RuntimeError("No candidates for requested classes")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     quality = {}
     for site in sites:
         problem = site_issue(site, args.min_lrc_cavern_m3)
-        if not problem and args.require_raw_pmin and "raw minimum missing" in site.min_source:
-            problem = "operating minimum is inferred; --require-raw-pmin is set"
+        if not problem and args.require_raw_pmin and site.raw_pmin_bar is None:
+            problem = "reported minimum missing; --require-raw-pmin is set"
         quality[site.row_index] = {
             **site_fields(site), "status": "incomplete_or_excluded" if problem else "eligible_for_costing",
             "reason": problem,
         }
-    print(f"Read {len(sites)} site rows from {args.input}")
+    print(f"Read {len(sites)} site rows from {args.input}; "
+          f"minimum pressure basis: {args.min_pressure_source}")
     for cls in args.classes:
         all_count = sum(s.cls == cls for s in sites)
         complete = sum(s.cls == cls and not quality[s.row_index]["reason"] for s in sites)
@@ -706,7 +811,7 @@ def main() -> None:
         for cls in args.classes:
             summary, class_rows, comp, medoids, synthetic = evaluate_class(
                 cls, sites, models, quality, args.min_sites,
-                args.min_lrc_cavern_m3)
+                args.min_lrc_cavern_m3, args.min_pressure_source)
             summaries.append(summary)
             ranked.extend(class_rows)
             comparisons.extend(comp)
@@ -731,10 +836,10 @@ def main() -> None:
                 f"{key}={synthetic[key]:.4g}" for key in COSTS))
             print("      Available-site counts per mean: " + ", ".join(
                 f"{field}={synthetic[f'n_source_{field}']}"
-                for field in (("h2_reference_gwh", "depth_m", "raw_pmin_bar",
+                for field in (("h2_reference_gwh", "depth_m", "pmin_bar",
                                "pmax_bar", "abandonment_bar") if cls == "DGF"
                               else ("h2_reference_gwh", "depth_m",
-                                    "raw_pmin_bar", "pmax_bar"))))
+                                    "pmin_bar", "pmax_bar"))))
             sweep = sweep_design(cls, medoids, models, args.sweep_points, quality)
             sensitivity.extend(sweep)
             if not args.no_plots:
@@ -750,7 +855,7 @@ def main() -> None:
         print("CSV-only validation complete; cost functions not executed.")
         return
 
-    summary_cols = ["storage_class", "status", "issue", "n_total", "n_eligible",
+    summary_cols = ["storage_class", "minimum_pressure_basis", "status", "issue", "n_total", "n_eligible",
                     "n_model_success", "n_distinct_facilities", "n_model_failure",
                     "minimum_cohort_size",
                     "capacity_basis", "min_E_gwh", "max_E_gwh",

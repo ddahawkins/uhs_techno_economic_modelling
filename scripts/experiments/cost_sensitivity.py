@@ -10,7 +10,7 @@ A factor may comprise one model parameter or a physically correlated bundle of
 parameters. The ordinary screening registry is restricted to factors for which a
 low/default/high interpretation is meaningful. Reservoir depth and three coupled pressure-coordinate screens are retained:
 absolute pressure level, operating pressure-ratio headroom, and (DGF only)
-abandonment fraction. Every pressure screen preserves pressure ordering.
+abandonment-pressure clearance. Every pressure screen preserves pressure ordering.
 
 Documented site configurations are evaluated separately from the OAT screen.
 They are loaded from ``RESERVOIR_SAMPLES_CSV`` for DGF, SA, SC and LRC, using
@@ -72,10 +72,11 @@ Notes
 * Changing reservoir depth, either in the OAT screen or a reservoir-sample
   case, recalculates reservoir temperature using the same screening-level
   geothermal relationship used by the design assumptions.
-* The broad factor screens retain their separately specified pressure-coordinate
-  baselines. The site sweep preserves documented pressures, including LRC sites
-  below the pipeline interface; its comparison baseline uses the selected
-  reference site's geological configuration at the candidate's own capacity.
+* The broad factor screens use the same selected medoid pressure/depth baselines
+  as the site sweep. The site sweep preserves documented pressures (by default
+  the raw "Minimum pressure bar" field), including minima below the 55-bar
+  pipeline interface; its comparison baseline uses the selected medoid's
+  geological configuration at the candidate's own capacity.
 * Compressor efficiency/design-margin sensitivities are intentionally not
   implemented because those parameters remain internal defaults of
   ``CompressionInput`` rather than exposed project assumptions.
@@ -89,6 +90,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 import csv
 import math
+import unicodedata
 from typing import Any, Callable, Literal, Mapping
 
 import matplotlib.pyplot as plt
@@ -148,6 +150,17 @@ OUTPUT_SITE_SPECTRUM_PDF = FIGURE_DIR / "site_tcr_spectrum_by_technology.pdf"
 # factor screening, this site sweep uses each site's documented H2 capacity.
 # Rows without a complete site design are retained in the CSV as diagnostics.
 RESERVOIR_SAMPLES_CSV = Path("data/resources/uhs_reference_sites.csv")
+
+# Empirical porous-media well counts
+USE_REPORTED_SITE_WELL_COUNTS = True
+
+DEFAULT_PRODUCTION_WELLS = 24
+DEFAULT_OBSERVATION_WELLS = 6
+
+# Set to "operating" to reproduce the earlier Min. Op. Pressure field,
+# falling back to the raw reported minimum when the operating field is empty.
+MIN_PRESSURE_SOURCE: Literal["reported", "operating"] = "reported"
+MIN_LRC_CAVERN_M3 = 5000.0
 RUN_RESERVOIR_SAMPLE_SWEEP = True
 RUN_RESERVOIR_STORAGE_CLASSES: tuple[str, ...] | None = None
 RUN_RESERVOIR_SITES: tuple[str, ...] | None = None
@@ -159,7 +172,7 @@ RESERVOIR_SAMPLE_SORT: Literal["input", "Site", "storage_tcr"] = "input"
 SELECTED_ECONOMIC_MEDOIDS = {
     "depleted_gas_field": "Sabbioncello",
     "aquifer": "Gournay Sur Aronde",
-    "salt_cavern": "Manosque",
+    "salt_cavern": "Xanten",
     "lined_rock_cavern": "Skallen",
 }
 
@@ -217,22 +230,22 @@ REFERENCE_FACILITY_RANGES: dict[str, ReferenceFacilityRange] = {
     # They are not executed by this broad exogenous-cost screen; E/EPR/WTIR are
     # explored in linearisation_sensitivity.py.
     "salt_cavern": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(500.0, 750.0, 1000.0),
+        storage_capacity_gwh_lhv=(397.36/2, 397.36, 397.36*1.5),
         epr_days=(6.0, 12.0, 18.0),
         wtir=(1.0, 2.0, 3.0),
     ),
     "depleted_gas_field": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(960.0, 1700.0, 2900.0),
+        storage_capacity_gwh_lhv=(9605.75/2, 9605.75, 9605.75*1.5),
         epr_days=(33.0, 66.0, 100.0),
         wtir=(1.0, 2.0, 3.0),
     ),
     "aquifer": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(960.0, 1700.0, 2900.0),
+        storage_capacity_gwh_lhv=(5032.31/2, 5032.31, 5032.31*1.5),
         epr_days=(33.0, 66.0, 100.0),
         wtir=(1.0, 2.0, 3.0),
     ),
     "lined_rock_cavern": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(10.0, 20.0, 20.0),
+        storage_capacity_gwh_lhv=(35.83/2, 35.83, 35.83*1.5),
         epr_days=(5.0, 7.5, 10.0),
         wtir=(1.0, 2.0, 3.0),
     ),
@@ -323,22 +336,21 @@ RESERVOIR_STORAGE_CLASS_TO_TECHNOLOGY: dict[str, str] = {
     "LRC": "lined_rock_cavern",
 }
 
-# Site-reference geological defaults are deliberately independent of the older
-# broad-factor sensitivity registry; that registry can be recalibrated later.
-# Abandonment pressure is relevant to DGF only.
+# Shared medoid design coordinates for the broad factor screen and the
+# site-specific reference comparison. Abandonment pressure applies to DGF only.
 RESERVOIR_SAMPLE_REFERENCE_DESIGNS: dict[str, dict[str, float]] = {
     "depleted_gas_field": {"reference_reservoir_depth_m": 1100.,
                            "minimum_operating_pressure_pa": 77.4e5,
                            "maximum_operating_pressure_pa": 142.2e5,
                            "abandonment_pressure_pa": 68.65e5},
     "aquifer": {"reference_reservoir_depth_m": 720.,
-                "minimum_operating_pressure_pa": 55e5,
+                "minimum_operating_pressure_pa": 71e5,
                 "maximum_operating_pressure_pa": 106e5},
-    "salt_cavern": {"reference_reservoir_depth_m": 1000.,
-                    "minimum_operating_pressure_pa": 60e5,
-                    "maximum_operating_pressure_pa": 190e5},
+    "salt_cavern": {"reference_reservoir_depth_m": 1017.0,
+                    "minimum_operating_pressure_pa": 33e5,
+                    "maximum_operating_pressure_pa": 204e5,},
     "lined_rock_cavern": {"reference_reservoir_depth_m": 115.,
-                          "minimum_operating_pressure_pa": 10e5,
+                          "minimum_operating_pressure_pa": 30e5,
                           "maximum_operating_pressure_pa": 230e5},
 }
 
@@ -432,14 +444,14 @@ REFERENCE_ONLY_OVERRIDES: tuple[ReferenceOnlyOverride, ...] = (
     # Absolute reference pressure coordinates (Pa). The factors below modify
     # these coherently rather than claiming independent low/high pressures.
     ReferenceOnlyOverride("design_general", "minimum_operating_pressure_pa",
-                          {"salt_cavern": 72.0, "depleted_gas_field": 77.83,
-                           "aquifer": 118.59, "lined_rock_cavern": 55.0},
+                          {key: values["minimum_operating_pressure_pa"] / 1e5
+                           for key, values in RESERVOIR_SAMPLE_REFERENCE_DESIGNS.items()},
                           ALL_TECHS, "bar", input_scale=1e5),
     ReferenceOnlyOverride("design_general", "maximum_operating_pressure_pa",
-                          {"salt_cavern": 180.0, "depleted_gas_field": 151.62,
-                           "aquifer": 143.67, "lined_rock_cavern": 200.0},
+                          {key: values["maximum_operating_pressure_pa"] / 1e5
+                           for key, values in RESERVOIR_SAMPLE_REFERENCE_DESIGNS.items()},
                           ALL_TECHS, "bar", input_scale=1e5),
-    ReferenceOnlyOverride("design_general", "abandonment_pressure_pa", 46.04,
+    ReferenceOnlyOverride("design_general", "abandonment_pressure_pa", 68.65,
                           ("depleted_gas_field",), "bar", input_scale=1e5),
 
     ReferenceOnlyOverride(
@@ -485,22 +497,22 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 override_scope="design_general",
                 parameter="reference_reservoir_depth_m",
                 low={
-                    "salt_cavern": 500.0,
-                    "depleted_gas_field": 800.0,
-                    "aquifer": 800.0,
-                    "lined_rock_cavern": 100.0,
+                    "salt_cavern": 508.5,
+                    "depleted_gas_field": 550.0,
+                    "aquifer": 360.0,
+                    "lined_rock_cavern": 57.5,
                 },
                 default={
-                    "salt_cavern": 1000.0,
-                    "depleted_gas_field": 1957.0,
-                    "aquifer": 1162.0,
-                    "lined_rock_cavern": 150.0,
+                    "salt_cavern": 1017.0,
+                    "depleted_gas_field": 1100.0,
+                    "aquifer": 720.0,
+                    "lined_rock_cavern": 115.0,
                 },
                 high={
-                    "salt_cavern": 1500.0,
-                    "depleted_gas_field": 3000.0,
-                    "aquifer": 3000.0,
-                    "lined_rock_cavern": 200.0,
+                    "salt_cavern": 1525.5,
+                    "depleted_gas_field": 1650.0,
+                    "aquifer": 1080,
+                    "lined_rock_cavern": 172.5,
                 },
                 unit="m",
             ),
@@ -526,15 +538,21 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
         technologies=ALL_TECHS,
         overrides=(SensitivityOverride(
             override_scope="design_general", parameter="minimum_operating_pressure_pa",
-            low=0.5, default=1.0, high=1.5, unit="pressure scale ×",
+            low=0.6, #0.6 because 0.5 invalidates the model.
+            default=1.0, high=1.4, unit="pressure scale ×",
         ),),
         range_basis="symmetric factor screen",
-        source="Study-defined 0.5–1.5 multiplier",
-        note=("Scale all physical pressure coordinates by 0.5, 1.0, 1.5. "
-              "The operating ratio and DGF abandonment fraction are constant; "
-              "the absolute pressure difference changes. For LRC the interface "
-              "pipeline pressure is also scaled to preserve the model's equality "
-              "between minimum cavern and pipeline pressure. Depth is fixed."),
+        source="Study-defined 0.6–1.4 multiplier",
+        note=(
+            "Scale all physical storage-pressure coordinates by "
+            "0.6, 1.0 and 1.4 across all technologies. "
+            "The common lower multiplier is selected to maintain "
+            "feasibility within the current injection-compression "
+            "and HyStories compressor-staging assumptions. "
+            "The operating pressure ratio and DGF abandonment "
+            "fraction remain constant. Pipeline pressure is fixed "
+            "at 55 bar, and reservoir depth is unchanged."
+        ),
     ),
     SensitivitySpec(
         key="reservoir_pressure_ratio",
@@ -543,27 +561,30 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
         technologies=ALL_TECHS,
         overrides=(SensitivityOverride(
             override_scope="design_general", parameter="maximum_operating_pressure_pa",
-            low=0.5, default=1.0, high=1.5, unit="ratio excess scale ×",
+            low={"salt_cavern": 0.5, "depleted_gas_field": 0.5,
+                 "aquifer": 0.5, "lined_rock_cavern": 0.5},
+            default=1.0, high=1.5, unit="ratio excess scale ×",
         ),),
         range_basis="symmetric factor screen",
         source="Study-defined 0.5–1.5 multiplier",
         note=("Scale R-1, where R=Pmax/Pmin, by 0.5, 1.0, 1.5; "
               "hold Pmin, Pab and depth fixed. This is NOT 0.5 × R: "
-              "scaling R directly can imply Pmax<Pmin for narrow aquifer windows."),
+              "scaling R directly can imply Pmax<Pmin for narrow aquifer windows. "),
     ),
     SensitivitySpec(
         key="reservoir_abandonment_fraction",
-        label="DGF abandonment-pressure fraction",
+        label="DGF abandonment-pressure clearance",
         category="Geological / storage design",
         technologies=("depleted_gas_field",),
         overrides=(SensitivityOverride(
             override_scope="design_general", parameter="abandonment_pressure_pa",
-            low=0.5, default=1.0, high=1.5, unit="Pab/Pmin scale ×",
+            low=0.5, default=1.0, high=1.5, unit="(Pmin-Pab) scale ×",
         ),),
         range_basis="symmetric factor screen",
         source="Study-defined 0.5–1.5 multiplier",
-        note=("Scale A=Pab/Pmin by 0.5, 1.0, 1.5 at fixed "
-              "Pmin, operating ratio, and depth; enforce 0<A<1."),
+        note=("Scale Pmin-Pab by 0.5, 1.0, 1.5 at fixed Pmin, "
+              "operating ratio and depth; ensure 0<Pab<Pmin. This avoids "
+              "a nonphysical Pab>Pmin in the selected Sabbioncello baseline."),
     ),
     SensitivitySpec(
         key="recoverability_factor",
@@ -649,7 +670,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 override_scope="design_technology",
                 parameter="maximum_withdrawal_flow_per_cavern_million_sm3_per_day",
                 low=1.5,
-                default=2.8,
+                default=2.79,
                 high=5.9,
                 unit="million Sm3/day/cavern",
             ),
@@ -772,29 +793,30 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
             SensitivityOverride(
                 override_scope="design_technology",
                 parameter="number_production_well_heads",
-                low=12,
-                default=24,
-                high=36,
+                low={"depleted_gas_field": 17,"aquifer": 29},
+                default={"depleted_gas_field": 33,"aquifer": 58},
+                high={"depleted_gas_field": 50,"aquifer": 87},
                 unit="wells",
                 integer=True,
             ),
             SensitivityOverride(
                 override_scope="design_technology",
                 parameter="number_observation_well_heads",
-                low=1,
-                default=6,
-                high=12,
+                low={"depleted_gas_field": 3,"aquifer": 8},
+                default={"depleted_gas_field": 5,"aquifer": 16},
+                high={"depleted_gas_field": 8,"aquifer": 24},
                 unit="wells",
                 integer=True,
             ),
         ),
-        range_basis="literature",
-        source="HyStories D7.1-1 conceptual porous-media wellfield cases",
+        range_basis="reference-site-anchored engineering sensitivity",
+        source="Empirical reference-site well counts; ±50% engineering screening range",
         note=(
-            "Production and observation wells are varied as a coupled wellfield "
-            "design using the low/reference/high conceptual cases reported by "
-            "HyStories. This is preferable to independently combining well counts "
-            "which were not defined as separate site archetypes in the source."
+            "Production and observation wells are varied together "
+            "between 50% and 150% of the technology-specific economic "
+            "medoid reference counts. Values are rounded to positive "
+            "integers. The ranges represent engineering sensitivity "
+            "assumptions, rather than empirical uncertainty bounds."
         ),
     ),
     SensitivitySpec(
@@ -1050,17 +1072,8 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 parameter="pipeline_pressure_pa",
                 low=46.2,
                 default=55.0,
-                high=66.2,
-                unit="bar",
-                input_scale=1e5,
-            ),
-            SensitivityOverride(
-                override_scope="design_general",
-                parameter="minimum_operating_pressure_pa",
-                technologies=("lined_rock_cavern",),
-                low=46.2,
-                default=55.0,
-                high=66.2,
+                high={"salt_cavern": 66.2, "depleted_gas_field": 66.2,
+                      "aquifer": 66.2, "lined_rock_cavern": 66.2},
                 unit="bar",
                 input_scale=1e5,
             ),
@@ -1070,10 +1083,9 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
         note=(
             "The sensitivity spans Hynetwork's envisaged long-term operating "
             "range of 46.2-66.2 bar(g), with 55 bar used as a representative "
-            "mid-range reference. For LRCs the minimum storage pressure is "
-            "changed with the network pressure because the present formulation "
-            "treats that minimum as a delivery/interface requirement rather than "
-            "a depth-controlled geomechanical limit."
+            "mid-range reference.The LRC minimum storage pressure remains "
+            "independent of the network: withdrawal compression handles the "
+            "resulting delivery pressure difference."
         ),
     ),
     SensitivitySpec(
@@ -1624,12 +1636,101 @@ def parse_optional_float(value: Any) -> float | None:
         return None
     return float(text.replace(",", ""))
 
+def parse_optional_well_count(value: Any) -> int | None:
+    """Parse a reported well count, allowing missing values."""
+
+    parsed = parse_optional_float(value)
+
+    if parsed is None:
+        return None
+
+    if not math.isfinite(parsed) or parsed <= 0 or not parsed.is_integer():
+        raise ValueError(
+            f"Invalid well count {value!r}; expected a positive integer"
+        )
+
+    return int(parsed)
+
+
+def site_well_counts(sample: Mapping[str, Any]) -> tuple[int, int]:
+    """Return effective production and observation well counts."""
+
+    reported_production = parse_optional_well_count(
+        sample.get("Number Production Wells")
+    )
+
+    reported_observation = parse_optional_well_count(
+        sample.get("Number Observation Wells")
+    )
+
+    if not USE_REPORTED_SITE_WELL_COUNTS:
+        return DEFAULT_PRODUCTION_WELLS, DEFAULT_OBSERVATION_WELLS
+
+    production = (
+        reported_production
+        if reported_production is not None
+        else DEFAULT_PRODUCTION_WELLS
+    )
+
+    observation = (
+        reported_observation
+        if reported_observation is not None
+        else DEFAULT_OBSERVATION_WELLS
+    )
+
+    return production, observation
+
+def sample_facility_key(sample: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Same duplicate-site identity rule as reference_selection.group_key."""
+    countries = {"de": "germany", "fr": "france", "nl": "netherlands",
+                 "at": "austria", "se": "sweden", "uk": "united kingdom"}
+    country = str(sample.get("Country", "")).strip().lower()
+    country = countries.get(country, country)
+    name = str(sample.get("Site", "")).lower().translate(str.maketrans(
+        {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}))
+    name = unicodedata.normalize("NFKD", name)
+    name = "".join(ch for ch in name if ch.isalnum())
+    return str(sample.get("Storage class", "")).upper(), country, name
+
+
+def site_sample_weights(samples: list[Mapping[str, Any]]) -> list[float]:
+    keys = [sample_facility_key(sample) for sample in samples]
+    counts = {key: keys.count(key) for key in set(keys)}
+    return [1.0 / counts[key] for key in keys]
+
+
+def weighted_median(values: list[float], weights: list[float]) -> float:
+    """Weighted Q50, with interpolation at cumulative-weight midpoints."""
+    pairs = sorted(zip(values, weights))
+    if not pairs or sum(weights) <= 0:
+        raise ValueError("Empty/invalid weighted median")
+    total = sum(weights)
+    points = []
+    cumulative = 0.0
+    for value, weight in pairs:
+        if weight <= 0:
+            raise ValueError("Nonpositive Q50 weight")
+        points.append(((cumulative + 0.5 * weight) / total, value))
+        cumulative += weight
+    if 0.5 <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x0 <= 0.5 <= x1:
+            alpha = (0.5 - x0) / (x1 - x0)
+            return y0 + alpha * (y1 - y0)
+    return points[-1][1]
+
 
 def site_numeric_inputs(sample: Mapping[str, Any]) -> dict[str, float | None]:
-    """Parse the current site schema; never invent missing physical inputs."""
-    minimum = parse_optional_float(sample.get("Min. Op. Pressure"))
-    if minimum is None:
+    """Parse site geology with the same selectable pressure basis as selection."""
+    if MIN_PRESSURE_SOURCE == "reported":
         minimum = parse_optional_float(sample.get("Minimum pressure bar"))
+    elif MIN_PRESSURE_SOURCE == "operating":
+        minimum = parse_optional_float(sample.get("Min. Op. Pressure"))
+        if minimum is None:
+            minimum = parse_optional_float(sample.get("Minimum pressure bar"))
+    else:
+        raise ValueError(f"Unknown MIN_PRESSURE_SOURCE: {MIN_PRESSURE_SOURCE!r}")
     return {
         "E_gwh": parse_optional_float(sample.get("H2 reference working GWh")),
         "depth_m": parse_optional_float(sample.get("Reference depth m")),
@@ -1643,8 +1744,12 @@ def site_exclusion_reason(sample: Mapping[str, Any]) -> tuple[str, str] | None:
     """Return a recorded exclusion; missing data are not model failures."""
     try:
         inputs = site_numeric_inputs(sample)
+
+        if sample["technology"] in {"depleted_gas_field", "aquifer"}:
+            site_well_counts(sample)
+
     except (ValueError, TypeError) as exc:
-        return "invalid", f"Unparseable numeric site input: {exc}"
+        return "invalid", f"Unparseable site input: {exc}"
     required = ("E_gwh", "depth_m", "pmin_bar", "pmax_bar")
     if str(sample["technology"]) == "depleted_gas_field":
         required += ("pab_bar",)
@@ -1656,6 +1761,12 @@ def site_exclusion_reason(sample: Mapping[str, Any]) -> tuple[str, str] | None:
         return "invalid", "Nonfinite numeric site input"
     if inputs["E_gwh"] <= 0 or inputs["depth_m"] <= 0:
         return "invalid", "Nonpositive H2 capacity or reservoir depth"
+    if inputs["pmax_bar"] <= 55.0:
+        return "excluded", "Maximum pressure does not exceed 55-bar pipeline pressure"
+    if str(sample["technology"]) == "lined_rock_cavern":
+        maximum_volume = parse_optional_float(sample.get("Cavern volume maximum m3"))
+        if maximum_volume is not None and maximum_volume < MIN_LRC_CAVERN_M3:
+            return "excluded", f"LRC cavern smaller than {MIN_LRC_CAVERN_M3:g} m3"
     try:
         validate_pressures(
             str(sample["technology"]),
@@ -1700,7 +1811,7 @@ def load_reservoir_samples(
             raise ValueError(f"Reservoir-sample CSV has no header: {path}")
 
         required = {"Storage class", "Site", "H2 reference working GWh",
-                    "Reference depth m", "Min. Op. Pressure",
+                    "Reference depth m", "Minimum pressure bar", "Min. Op. Pressure",
                     "Maximum pressure bar", "Abandonment pressure bar"}
         missing = required - set(reader.fieldnames)
         if missing:
@@ -1884,19 +1995,22 @@ PRESSURE_COORDINATE_PARAMETERS = {
 }
 
 
-def pressure_coordinate_multiplier(sensitivity: SensitivitySpec, level: CaseLevel) -> float:
+def pressure_coordinate_multiplier(
+    sensitivity: SensitivitySpec, level: CaseLevel, technology: TechnologySpec,
+) -> float:
     if sensitivity.key not in PRESSURE_COORDINATE_SENSITIVITIES:
         raise ValueError(f"Not a pressure-coordinate sensitivity: {sensitivity.key}")
     if len(sensitivity.overrides) != 1:
         raise ValueError(f"{sensitivity.key} requires exactly one factor marker")
-    return float(getattr(sensitivity.overrides[0], level))
+    return float(resolve_range_value(getattr(sensitivity.overrides[0], level),
+                                     technology.technology))
 
 
 def apply_pressure_coordinates(
     general: Any, technology: TechnologySpec, sensitivity: SensitivitySpec, level: CaseLevel,
 ) -> Any:
     """Change one dimensionless pressure coordinate, preserving the others."""
-    factor = pressure_coordinate_multiplier(sensitivity, level)
+    factor = pressure_coordinate_multiplier(sensitivity, level, technology)
     pmin = float(general.minimum_operating_pressure_pa)
     pmax = float(general.maximum_operating_pressure_pa)
     if not (math.isfinite(pmin) and math.isfinite(pmax) and 0 < pmin < pmax):
@@ -1918,7 +2032,8 @@ def apply_pressure_coordinates(
     elif sensitivity.key == "reservoir_abandonment_fraction":
         if pab is None:
             raise ValueError("Abandonment sensitivity applies to DGF only")
-        pmin_new, pmax_new, pab_new = pmin, pmax, factor * pab
+        pmin_new, pmax_new = pmin, pmax
+        pab_new = pmin - factor * (pmin - pab)
     else:
         raise ValueError(f"Unknown pressure screen: {sensitivity.key}")
 
@@ -1929,9 +2044,6 @@ def apply_pressure_coordinates(
     }
     if pab_new is not None:
         updates["abandonment_pressure_pa"] = pab_new
-    if sensitivity.key == "reservoir_pressure_level" and technology.technology == "lined_rock_cavern":
-        # LRC's Pmin equals pipeline/interface pressure in the supplied model.
-        updates["pipeline_pressure_pa"] = factor * float(general.pipeline_pressure_pa)
     return replace(general, **updates)
 
 
@@ -2097,7 +2209,23 @@ def build_reservoir_sample_configuration(
     if technology.technology == "depleted_gas_field":
         updates["abandonment_pressure_pa"] = float(values["pab_bar"]) * 1e5
     general = replace(assumptions.general, **updates)
-    assumptions = replace(assumptions, general=general)
+
+    technology_specific = assumptions.technology_specific
+
+    if technology.technology in {"depleted_gas_field", "aquifer"}:
+        production_wells, observation_wells = site_well_counts(sample)
+
+        technology_specific = replace(
+            technology_specific,
+            number_production_well_heads=production_wells,
+            number_observation_well_heads=observation_wells,
+        )
+
+    assumptions = replace(
+        assumptions,
+        general=general,
+        technology_specific=technology_specific,
+    )
     description = (f"E={float(values['E_gwh']):g} GWh; depth={depth:g} m; "
                    f"Pmin={float(values['pmin_bar']):g} bar; "
                    f"Pmax={float(values['pmax_bar']):g} bar")
@@ -2126,7 +2254,7 @@ def sensitivity_case_definition(
             level if level != "default" else None,
         )
         g = cfg.general
-        parts = [f"factor={pressure_coordinate_multiplier(sensitivity, level):g} x",
+        parts = [f"factor={pressure_coordinate_multiplier(sensitivity, level, technology):g} x",
                  f"Pmin={g.minimum_operating_pressure_pa / 1e5:.3f} bar",
                  f"Pmax={g.maximum_operating_pressure_pa / 1e5:.3f} bar"]
         if technology.technology == "depleted_gas_field":
@@ -2580,9 +2708,9 @@ def run_experiment() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
 
 def _sample_metadata(sample: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in sample.items()
-        if not str(key).startswith("_") and key != "technology"
+        **{key: value for key, value in sample.items()
+           if not str(key).startswith("_") and key != "technology"},
+        "minimum_pressure_basis": MIN_PRESSURE_SOURCE,
     }
 
 
@@ -3052,7 +3180,7 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
     if len(techs) == 1:
         offsets = {techs[0].technology: 0.0}
     else:
-        jitter = np.linspace(-0, 0, len(techs))
+        jitter = np.linspace(-0.24, 0.24, len(techs))
         offsets = {
             spec.technology: float(offset)
             for spec, offset in zip(techs, jitter, strict=True)
@@ -3494,8 +3622,8 @@ def plot_site_tcr_spectrum_by_technology(rows: list[dict[str, Any]]) -> None:
 
             normalised_values = values / selected_rate
 
-            mean = np.mean(values)
-            median = np.median(values)
+            median = weighted_median(values.tolist(),
+                                     site_sample_weights(ordered_samples))
 
             offsets = np.linspace(-0.0, 0.0, len(values))
             ax.scatter(values, y + offsets, s=60, color="white",
