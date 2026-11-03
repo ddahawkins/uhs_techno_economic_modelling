@@ -70,6 +70,7 @@ from pathlib import Path
 import csv
 import math
 from typing import Any, Callable
+import numpy as np
 
 import matplotlib.pyplot as plt
 
@@ -124,15 +125,17 @@ RUN_SENSITIVITIES = (
 # The same multipliers are used for every technology, which makes the x-axis
 # directly comparable across technologies. The corresponding absolute E and EPR
 # values are still written to the CSV.
-DESIGN_POINT_MULTIPLIERS = (
-    0.25,
-    0.50,
-    0.75,
-    1.00,
-    1.25,
-    1.50,
-    2.00,
-)
+DESIGN_POINT_MULTIPLIERS = np.linspace(0.1,2,20) 
+    
+#     (
+#     0.25,
+#     0.50,
+#     0.75,
+#     1.00,
+#     1.25,
+#     1.50,
+#     2.00,
+# )
 
 # WTIR is deliberately kept in its natural units rather than normalised.
 WTIR_SWEEP = (1.0, 2.0, 3.0, 4.0, 5.0)
@@ -166,7 +169,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="salt_cavern",
         project_constructor=construct_salt_cavern_project,
         cost_function=calculate_salt_cavern_cost_components,
-        default_storage_capacity_gwh_lhv=800.0,
+        default_storage_capacity_gwh_lhv=397.36,
         default_epr_days=12.0,
         default_wtir=2.0,
     ),
@@ -176,7 +179,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="depleted_gas_field",
         project_constructor=construct_dgf_project,
         cost_function=calculate_depleted_gas_field_cost_components,
-        default_storage_capacity_gwh_lhv=1700.0,
+        default_storage_capacity_gwh_lhv=9605.75,
         default_epr_days=66.0,
         default_wtir=2.0,
     ),
@@ -186,7 +189,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="aquifer",
         project_constructor=construct_aquifer_project,
         cost_function=calculate_aquifer_cost_components,
-        default_storage_capacity_gwh_lhv=1700.0,
+        default_storage_capacity_gwh_lhv=5032.31,
         default_epr_days=66.0,
         default_wtir=2.0,
     ),
@@ -196,7 +199,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="lined_rock_cavern",
         project_constructor=construct_lrc_project,
         cost_function=calculate_lined_rock_cavern_cost_components,
-        default_storage_capacity_gwh_lhv=20.0,
+        default_storage_capacity_gwh_lhv=21.33,
         default_epr_days=8.0,
         default_wtir=2.0,
     ),
