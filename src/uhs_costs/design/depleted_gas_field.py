@@ -40,8 +40,17 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
         'minimum_operating_pressure_pa': 77.4e5, #from reference_selection script
         'maximum_operating_pressure_pa': 142.2e5, #from reference_selection script
         'abandonment_pressure_pa': 68.65e5, #from reference_selection script
-    }
+    },
+    technology_overrides={
+        "number_production_well_heads": 33,
+        "number_observation_well_heads": 5,
+    },
 )
+
+REFERENCE_SITE = "Sabbioncello"
+REFERENCE_CAPACITY_GWH_LHV = 2336.66
+REFERENCE_EPR_DAYS = 66.0
+REFERENCE_WTIR = 2.0
 
 # ----------------------------------------------------------------------------------------------------
 #

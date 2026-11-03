@@ -207,7 +207,7 @@ def construct_general_design_assumptions(
         assumptions = GeneralDesignAssumptions(
             purification_factor=0.0,
             purification_hydrogen_recovery=1.0,
-            reference_reservoir_depth_m=1_000.0,
+            reference_reservoir_depth_m=1017.0,
             recovery_factor=0.9983
         )
 
@@ -215,7 +215,7 @@ def construct_general_design_assumptions(
         assumptions = GeneralDesignAssumptions(
             purification_factor=0.0,
             purification_hydrogen_recovery=1.0,
-            reference_reservoir_depth_m=150.0,
+            reference_reservoir_depth_m=115.0,
             recovery_factor=1
         )
 
@@ -223,14 +223,14 @@ def construct_general_design_assumptions(
         assumptions = GeneralDesignAssumptions(
             purification_factor=1.5,
             purification_hydrogen_recovery=0.8996,
-            reference_reservoir_depth_m=1956.0,
+            reference_reservoir_depth_m=1100.0,
             recovery_factor=0.8
         )
     elif storage_technology == StorageTechnology.AQUIFER:
         assumptions = GeneralDesignAssumptions(
             purification_factor=0.33,
             purification_hydrogen_recovery=0.95,
-            reference_reservoir_depth_m=1162.0, 
+            reference_reservoir_depth_m=720.0, 
             recovery_factor=0.9  
         )
 

@@ -41,11 +41,15 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.LINED_ROCK_CAVERN,
     general_overrides={
         'reference_reservoir_depth_m': 115, # from reference_selection script
-        'minimum_operating_pressure_pa': 10e5, # from reference_selection script
+        'minimum_operating_pressure_pa': 30e5, # from reference_selection script
         'maximum_operating_pressure_pa': 230e5, # from reference_selection script
         'abandonment_pressure_pa': 0,
     }
 )
+REFERENCE_SITE = "Skallen"
+REFERENCE_CAPACITY_GWH_LHV = 21.33
+REFERENCE_EPR_DAYS = 7.5
+REFERENCE_WTIR = 2.0
 
 # ----------------------------------------------------------------------------------------------------
 #

@@ -42,12 +42,16 @@ from uhs_costs.design.default_design_assumptions import HyStoriesDesignAssumptio
 ASSUMPTIONS = construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.SALT_CAVERN,
     general_overrides={
-        'reference_reservoir_depth_m': 1161.32,
-        'minimum_operating_pressure_pa': 105e5,
-        'maximum_operating_pressure_pa': 213e5,
+        'reference_reservoir_depth_m': 1017.0,
+        'minimum_operating_pressure_pa': 33e5,
+        'maximum_operating_pressure_pa': 204e5,
         'abandonment_pressure_pa': 0,
     }
 )
+REFERENCE_SITE = "Xanten"
+REFERENCE_CAPACITY_GWH_LHV = 397.36
+REFERENCE_EPR_DAYS = 12.0
+REFERENCE_WTIR = 2.0
 
 # ----------------------------------------------------------------------------------------------------
 #

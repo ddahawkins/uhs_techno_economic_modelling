@@ -38,11 +38,19 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
     storage_technology=StorageTechnology.AQUIFER,
     general_overrides={
         'reference_reservoir_depth_m': 720, #from reference_selection script
-        'minimum_operating_pressure_pa': 55e5,  #from reference_selection script
+        'minimum_operating_pressure_pa': 71e5,  #from reference_selection script
         'maximum_operating_pressure_pa': 106e5, #from reference_selection script
         'abandonment_pressure_pa': 0,
-    }
+    },
+    technology_overrides={
+        "number_production_well_heads": 58,
+        "number_observation_well_heads": 16,
+    },
 )
+REFERENCE_SITE = "Gournay Sur Aronde"
+REFERENCE_CAPACITY_GWH_LHV = 2571.34
+REFERENCE_EPR_DAYS = 66.0
+REFERENCE_WTIR = 2.0
 
 # ----------------------------------------------------------------------------------------------------
 #
