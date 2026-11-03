@@ -126,16 +126,6 @@ RUN_SENSITIVITIES = (
 # directly comparable across technologies. The corresponding absolute E and EPR
 # values are still written to the CSV.
 DESIGN_POINT_MULTIPLIERS = np.linspace(0.1,2,20) 
-    
-#     (
-#     0.25,
-#     0.50,
-#     0.75,
-#     1.00,
-#     1.25,
-#     1.50,
-#     2.00,
-# )
 
 # WTIR is deliberately kept in its natural units rather than normalised.
 WTIR_SWEEP = (1.0, 2.0, 3.0, 4.0, 5.0)
