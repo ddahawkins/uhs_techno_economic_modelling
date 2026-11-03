@@ -245,7 +245,7 @@ REFERENCE_FACILITY_RANGES: dict[str, ReferenceFacilityRange] = {
         wtir=(1.0, 2.0, 3.0),
     ),
     "lined_rock_cavern": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(35.83/2, 35.83, 35.83*1.5),
+        storage_capacity_gwh_lhv=(21.33/2, 21.33, 21.33*1.5),
         epr_days=(5.0, 7.5, 10.0),
         wtir=(1.0, 2.0, 3.0),
     ),
