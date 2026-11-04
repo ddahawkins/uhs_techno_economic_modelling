@@ -14,6 +14,12 @@ Each sample contains:
     - Fixed and variable OPEX rates
     - Applicable EPR and WTIR intervals
 
+For the cross-driver method only, coefficients are fitted independently in
+each sample's EPR/WTIR cell, with a small storage-capacity sensitivity to
+identify both slopes. A sample's fitted total need not reproduce the detailed
+cost at its centre; this approximation error is reported rather than removed
+by anchoring.
+
 Grid points are bin MIDPOINTS. The reference design is not forced into the
 sample set.
 
@@ -22,10 +28,10 @@ them, including whether ratios are fixed or bounded.
 
 Run from the repository root:
 
-    pixi run python -m scripts.cost_sample_generator `
+    pixi run python -m scripts.experiments.cost_rates `
         --technology aquifer `
-        --method fully_decoupled `
-        --n-epr 1 `
+        --method fully_decoupled_cross_driver `
+        --n-epr 3 `
         --n-wtir 1
 """
 
@@ -50,6 +56,7 @@ from uhs_costs.cost_model.helpers.cost_components import (
     CostUnit,
     HyStoriesGroup,
 )
+from uhs_costs.analysis.linear_cost_fit import fit_two_driver_cost
 
 from scripts.experiments.linearisation_sensitivity import (
     TECHNOLOGIES,
@@ -84,10 +91,9 @@ class SamplingConfig:
     # WTIR is an absolute ratio.
     wtir_range: tuple[float, float] = (1.0, 5.0)
 
-    # Local relative perturbation for anchored cross-driver fitting.
-    # This does NOT create additional CEM investment samples.
-    cross_driver_fit_step: float = 0.10
-
+    # Only the cross-driver formulation uses this extra capacity sensitivity
+    # to identify coefficients. It does NOT add storage-capacity samples.
+    cross_driver_storage_perturbation: float = 0.10
 
 @dataclass(frozen=True)
 class Interval:
@@ -170,6 +176,10 @@ class SampledCostSet:
 
     cross_driver_diagnostics: tuple[FitDiagnostic, ...] = ()
 
+    # Not necessarily zero: unanchored local fits need not match the detailed
+    # investment cost at their sample centre.
+    centre_tcr_error_pct: float = 0.0
+
 
 CAPITAL_TYPES = (CostType.CAPEX, CostType.ABEX)
 
@@ -213,9 +223,10 @@ def validate_config(config: SamplingConfig) -> CostMethod:
                 "with finite values."
             )
 
-    if not 0 < config.cross_driver_fit_step < 0.5:
+
+    if not 0 < config.cross_driver_storage_perturbation < 1:
         raise ValueError(
-            "cross_driver_fit_step must lie between 0 and 0.5."
+            "cross_driver_storage_perturbation must be strictly between 0 and 1."
         )
 
     return method
@@ -443,7 +454,7 @@ def extract_cem_rates(
 
 
 # =============================================================================
-# Reference-anchored cross-driver representation
+# Unanchored, interval-specific cross-driver representation
 # =============================================================================
 
 
@@ -461,194 +472,132 @@ def capital_group_cost(
 
 def local_training_cases(
     spec: TechnologySpec,
-    epr_days: float,
-    wtir: float,
     epr_factor_interval: Interval,
     wtir_interval: Interval,
-    step: float,
+    storage_perturbation: float,
 ) -> list[tuple[dict[CostDriver, float], CostBreakdown]]:
-    """Construct nearby designs used to fit local cross-driver coefficients.
+    """Evaluate a small regular grid *inside* one sample's validity cell.
 
-    The first case is always the sample centre. This anchors the regression
-    to its own calibration point, NOT necessarily the global reference design.
+    All three independent design quantities vary. The three EPR and WTIR
+    points lie 20%, 50%, and 80% of the way across each interval so we do not
+    evaluate adjacent cells' shared boundaries. The three storage values
+    provide independent scale variation without sampling E in the CEM.
+
+    No global EPR >= 0.9 cutoff applies: low-EPR samples must learn from
+    their own region, including any nonlinear or discontinuous behaviour.
     """
 
-    E0 = spec.default_storage_capacity_gwh_lhv
+    def interior_grid(interval: Interval) -> tuple[float, float, float]:
+        width = interval.upper - interval.lower
+        return tuple(
+            interval.lower + fraction * width
+            for fraction in (0.2, 0.5, 0.8)
+        )
 
-    designs = [(E0, epr_days, wtir)]
-
-    # Vary E to learn how approximately fixed costs scale with storage size.
-    for direction in (-1, 1):
-        designs.append((
-            E0 * (1 + direction * step),
-            epr_days,
-            wtir,
-        ))
-
-    # EPR and WTIR perturbations remain inside the sample's validity cell.
-    epr_cell_width_days = (
-        epr_factor_interval.upper - epr_factor_interval.lower
-    ) * spec.default_epr_days
-
-    epr_delta = min(
-        epr_days * step,
-        0.4 * epr_cell_width_days,
+    storage_reference = spec.default_storage_capacity_gwh_lhv
+    storage_values = (
+        storage_reference * (1 - storage_perturbation),
+        storage_reference,
+        storage_reference * (1 + storage_perturbation),
     )
-
-    wtir_delta = min(
-        wtir * step,
-        0.4 * (wtir_interval.upper - wtir_interval.lower),
-    )
-
-    for direction in (-1, 1):
-        designs.append((
-            E0,
-            epr_days + direction * epr_delta,
-            wtir,
-        ))
-        designs.append((
-            E0,
-            epr_days,
-            wtir + direction * wtir_delta,
-        ))
 
     cases = []
-
-    for E, epr, ratio in designs:
-        try:
-            costs = evaluate_design(spec, E, epr, ratio)
-        except (ValueError, ArithmeticError) as exc:
-            raise ValueError(
-                f"Local cross-driver fit failed for {spec.technology}: "
-                f"E={E:.4g} GWh, EPR={epr:.4g} days, "
-                f"WTIR={ratio:.4g}. {exc}"
-            ) from exc
-
-        caps = design_capacities(spec, epr, ratio, E)
-        cases.append((caps, costs))
+    for storage_gwh, epr_factor, wtir in product(
+        storage_values,
+        interior_grid(epr_factor_interval),
+        interior_grid(wtir_interval),
+    ):
+        epr_days = epr_factor * spec.default_epr_days
+        capacities = design_capacities(
+            spec, epr_days=epr_days, wtir=wtir, storage_gwh=storage_gwh
+        )
+        breakdown = evaluate_design(
+            spec, storage_gwh=storage_gwh, epr_days=epr_days, wtir=wtir
+        )
+        cases.append((capacities, breakdown))
 
     return cases
 
 
-def anchored_two_driver_fit(
+def fit_local_two_driver(
     cases: list[tuple[dict[CostDriver, float], CostBreakdown]],
     cost_type: CostType,
     source_driver: CostDriver,
     own_driver: CostDriver,
     second_driver: CostDriver,
 ) -> tuple[dict[CostDriver, float], FitDiagnostic]:
-    """Fit C = a * own + b * second, anchored at the sample centre.
+    """Fit two unconstrained slopes and report error on local training cases."""
 
-    Using normalized capacities:
-        x = own / own_0
-        z = second / second_0
+    own = np.asarray([
+        capacities[own_driver]
+        for capacities, _ in cases
+    ])
 
-    The exact reference constraint is:
-        a_scaled + b_scaled = C0
+    secondary = np.asarray([
+        capacities[second_driver]
+        for capacities, _ in cases
+    ])
 
-    Therefore:
-        C = C0*x + b_scaled*(z-x)
-
-    This yields a one-dimensional, intercept-free least-squares problem.
-    """
-
-    caps0, breakdown0 = cases[0]
-
-    C0 = capital_group_cost(
-        breakdown0, cost_type, source_driver
-    )
-
-    own0 = caps0[own_driver]
-    second0 = caps0[second_driver]
-
-    x = np.asarray(
-        [caps[own_driver] / own0 for caps, _ in cases],
-        dtype=float,
-    )
-    z = np.asarray(
-        [caps[second_driver] / second0 for caps, _ in cases],
-        dtype=float,
-    )
-    y = np.asarray(
-        [
-            capital_group_cost(costs, cost_type, source_driver)
-            for _, costs in cases
-        ],
-        dtype=float,
-    )
-
-    delta = z - x
-    denominator = float(np.dot(delta, delta))
-
-    if denominator < 1e-12:
-        raise ValueError(
-            f"Degenerate cross-driver fit for {source_driver.value}."
+    y = np.asarray([
+        capital_group_cost(
+            breakdown,
+            cost_type,
+            source_driver,
         )
+        for _, breakdown in cases
+    ])
 
-    b_scaled = float(
-        np.dot(delta, y - C0 * x) / denominator
-    )
-    a_scaled = C0 - b_scaled
-
-    rates = {
-        own_driver: a_scaled / own0,
-        second_driver: b_scaled / second0,
-    }
-
-    predictions = a_scaled * x + b_scaled * z
-
-    mask = np.abs(y) > 1e-9
-    if mask.any():
-        errors = 100 * np.abs(
-            (predictions[mask] - y[mask]) / y[mask]
-        )
-        mean_error = float(np.mean(errors))
-        max_error = float(np.max(errors))
+    # An absent cost group is represented by a zero coefficient, not a
+    # numerically unstable regression against an all-zero target.
+    if np.allclose(y, 0.0, atol=1e-8, rtol=0):
+        a = b = 0.0
     else:
-        mean_error = 0.0
-        max_error = 0.0
+        a, b = fit_two_driver_cost(
+            own_capacity=own,
+            secondary_capacity=secondary,
+            detailed_cost=y,
+        )
 
-    assert isclose(
-        sum(rates[d] * caps0[d] for d in rates),
-        C0,
-        rel_tol=1e-9,
-        abs_tol=1e-4,
+    prediction = a * own + b * secondary
+    nonzero = np.abs(y) > 1e-8
+    percentage_errors = (
+        100.0 * np.abs(prediction[nonzero] - y[nonzero]) / np.abs(y[nonzero])
     )
-
-    return rates, FitDiagnostic(
+    diagnostic = FitDiagnostic(
         group=source_driver.value,
         cost_type=cost_type.value,
-        mean_absolute_percentage_error=mean_error,
-        max_absolute_percentage_error=max_error,
+        mean_absolute_percentage_error=(
+            float(np.mean(percentage_errors)) if percentage_errors.size else 0.0
+        ),
+        max_absolute_percentage_error=(
+            float(np.max(percentage_errors)) if percentage_errors.size else 0.0
+        ),
     )
 
+    return {own_driver: a, second_driver: b}, diagnostic
 
 def cross_driver_cost_mapping(
     spec: TechnologySpec,
     detailed: CostBreakdown,
     capacities: dict[CostDriver, float],
-    epr_days: float,
-    wtir: float,
     epr_factor_interval: Interval,
     wtir_interval: Interval,
-    fit_step: float,
+    storage_perturbation: float = 0.10,
 ) -> tuple[CostBreakdown, tuple[FitDiagnostic, ...]]:
-    """Build the anchored LP-compatible cross-driver cost representation."""
+    """Build an LP-compatible two-slope model for one design-space cell."""
 
     cases = local_training_cases(
         spec=spec,
-        epr_days=epr_days,
-        wtir=wtir,
         epr_factor_interval=epr_factor_interval,
         wtir_interval=wtir_interval,
-        step=fit_step,
+        storage_perturbation=storage_perturbation,
     )
 
     # Detailed source cost -> (primary driver, additional driver).
     #
     # Storage costs can depend on P_out through EPR.
-    # Injection costs can include a capacity-linked component.
-    # Withdrawal costs can include a capacity-linked component.
+    # Injection costs can depend on P_out as well as P_in through WTIR.
+    # Withdrawal costs can depend on E as well as P_out through EPR.
     models = (
         (
             CostDriver.STORAGE,
@@ -658,7 +607,7 @@ def cross_driver_cost_mapping(
         (
             CostDriver.INJECTION,
             CostDriver.INJECTION,
-            CostDriver.STORAGE,
+            CostDriver.WITHDRAWAL,
         ),
         (
             CostDriver.WITHDRAWAL,
@@ -678,7 +627,7 @@ def cross_driver_cost_mapping(
 
     for typ in CAPITAL_TYPES:
         for source, own, additional in models:
-            rates, diagnostic = anchored_two_driver_fit(
+            rates, diagnostic = fit_local_two_driver(
                 cases=cases,
                 cost_type=typ,
                 source_driver=source,
@@ -718,8 +667,8 @@ def cross_driver_cost_mapping(
                         else CostUnit.EUR_PER_KW
                     ),
                     notes=(
-                        "Synthetic reference-anchored cross-driver "
-                        "investment coefficient; not a physical component."
+                        "Synthetic unanchored local cross-driver investment "
+                        "coefficient; not a physical component."
                     ),
                 )
             )
@@ -751,10 +700,12 @@ def generate_cost_samples(
     method = validate_config(config)
     spec = get_technology(config.technology)
 
+
     epr_grid = make_grid(
         config.epr_factor_range,
         config.n_epr,
     )
+
     wtir_grid = make_grid(
         config.wtir_range,
         config.n_wtir,
@@ -805,11 +756,9 @@ def generate_cost_samples(
                 spec=spec,
                 detailed=detailed,
                 capacities=capacities,
-                epr_days=epr_days,
-                wtir=wtir,
                 epr_factor_interval=epr_factor_interval,
                 wtir_interval=wtir_interval,
-                fit_step=config.cross_driver_fit_step,
+                storage_perturbation=config.cross_driver_storage_perturbation,
             )
 
         else:
@@ -824,8 +773,8 @@ def generate_cost_samples(
             capacities,
         )
 
-        # Check that transformed investment costs reproduce the detailed
-        # model at the sample centre.
+        # Direct reallocation preserves the detailed investment total at
+        # the centre. An unanchored cross-driver fit is allowed to differ.
         original_tcr = sum(
             c.value_eur for c in detailed.components
             if c.cost_type in CAPITAL_TYPES
@@ -836,15 +785,22 @@ def generate_cost_samples(
             if c.cost_type in CAPITAL_TYPES
         )
 
-        if not isclose(
-            original_tcr,
-            mapped_tcr,
-            rel_tol=1e-9,
-            abs_tol=1e-3,
+        centre_tcr_error_pct = (
+            100.0 * (mapped_tcr - original_tcr) / original_tcr
+            if original_tcr else 0.0
+        )
+
+        if (
+            method != CostMethod.FULLY_DECOUPLED_CROSS_DRIVER
+            and not isclose(
+                original_tcr,
+                mapped_tcr,
+                rel_tol=1e-9,
+                abs_tol=1e-3,
+            )
         ):
             raise AssertionError(
-                "CEM representation failed to reproduce "
-                "the sample-centre investment cost."
+                "Direct CEM reallocation failed to preserve sample-centre TCR."
             )
 
         # Negative total capacity coefficients can be problematic in a
@@ -858,7 +814,7 @@ def generate_cost_samples(
             raise ValueError(
                 f"Negative fitted TCR coefficient for "
                 f"{spec.technology}, sample ({i}, {j}). "
-                "Inspect the anchored fit or narrow the domain."
+                "Inspect the local fit or narrow the sample interval."
             )
 
         sample = SampledCostSet(
@@ -886,6 +842,7 @@ def generate_cost_samples(
             fom_rates=fom_rates,
             vom_rates=vom_rates,
             cross_driver_diagnostics=diagnostics,
+            centre_tcr_error_pct=centre_tcr_error_pct,
         )
 
         samples.append(sample)
@@ -920,10 +877,14 @@ def write_sample_summary(
             "WTIR": s.wtir,
             "EPR_factor_lower": s.epr_factor_interval.lower,
             "EPR_factor_upper": s.epr_factor_interval.upper,
+            "EPR_factor_lower_inclusive": s.epr_factor_interval.lower_inclusive,
+            "EPR_factor_upper_inclusive": s.epr_factor_interval.upper_inclusive,
             "EPR_days_lower": s.epr_interval_days.lower,
             "EPR_days_upper": s.epr_interval_days.upper,
             "WTIR_lower": s.wtir_interval.lower,
             "WTIR_upper": s.wtir_interval.upper,
+            "WTIR_lower_inclusive": s.wtir_interval.lower_inclusive,
+            "WTIR_upper_inclusive": s.wtir_interval.upper_inclusive,
             "TCR_storage_EUR_per_kWh": s.tcr_rates.storage,
             "TCR_injection_EUR_per_kW": s.tcr_rates.injection,
             "TCR_withdrawal_EUR_per_kW": s.tcr_rates.withdrawal,
@@ -932,6 +893,11 @@ def write_sample_summary(
             "FOM_withdrawal_EUR_per_kW_year": s.fom_rates.withdrawal,
             "VOM_injection_EUR_per_kWh": s.vom_rates.injection,
             "VOM_withdrawal_EUR_per_kWh": s.vom_rates.withdrawal,
+            "centre_TCR_error_pct": s.centre_tcr_error_pct,
+            "local_fit_max_APE_pct": (
+                max(d.max_absolute_percentage_error for d in s.cross_driver_diagnostics)
+                if s.cross_driver_diagnostics else 0.0
+            ),
         })
 
     if not rows:
@@ -973,6 +939,12 @@ def main() -> None:
     parser.add_argument("--epr-max-factor", type=float, default=1.5)
     parser.add_argument("--wtir-min", type=float, default=1.0)
     parser.add_argument("--wtir-max", type=float, default=5.0)
+    parser.add_argument(
+        "--cross-driver-storage-perturbation",
+        type=float,
+        default=0.10,
+        help="Fractional +/- E perturbation for local cross-driver regression only.",
+    )
 
     parser.add_argument(
         "--csv",
@@ -996,6 +968,9 @@ def main() -> None:
             args.wtir_min,
             args.wtir_max,
         ),
+        cross_driver_storage_perturbation=(
+            args.cross_driver_storage_perturbation
+        ),
     )
 
     samples = generate_cost_samples(config)
@@ -1008,6 +983,11 @@ def main() -> None:
             f"TCR=[{s.tcr_rates.storage:.4f} EUR/kWh, "
             f"{s.tcr_rates.injection:.2f} EUR/kW, "
             f"{s.tcr_rates.withdrawal:.2f} EUR/kW]"
+            + (
+                f", centre TCR error={s.centre_tcr_error_pct:+.2f}%"
+                if s.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER
+                else ""
+            )
         )
 
     if args.csv is not None:

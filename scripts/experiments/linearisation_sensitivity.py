@@ -117,6 +117,8 @@ from uhs_costs.cost_model.salt_cavern import (
     calculate_salt_cavern_cost_components,
 )
 
+from uhs_costs.analysis.linear_cost_fit import fit_two_driver_cost
+
 
 # =============================================================================
 # User configuration
@@ -149,6 +151,11 @@ PLOT_SENSITIVITIES = (
 # directly comparable across technologies. The corresponding absolute E and EPR
 # values are still written to the CSV.
 DESIGN_POINT_MULTIPLIERS = np.linspace(0.5,1.5,11) 
+# Minimum EPR factor for the *global withdrawal figure* regression only.
+# Local cross-driver CEM samples are fitted independently over their own
+# EPR/WTIR cells, including cells below 0.9. This plot is a diagnostic of the
+# smoother high-EPR region, not a source of sampler coefficients.
+CROSS_DRIVER_EPR_MIN_FACTOR = 0.9
 
 # WTIR is deliberately kept in its natural units rather than normalised.
 WTIR_SWEEP = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
@@ -1805,55 +1812,50 @@ def plot_withdrawal_cost_model_comparison(
         ])
 
         # ---------------------------------------------------------
-        # Reference-anchored cross-driver regression
+        # Unanchored cross-driver regression (diagnostic figure).
         # ---------------------------------------------------------
 
-        # Identify the reference design.
-        reference_row = min(
-            epr_rows,
-            key=lambda r: abs(float(r["epr_factor"]) - 1.0),
+        # Use both the EPR and working-gas sweeps; exclude only the
+        # low-EPR observations with strongly discontinuous behaviour.
+        training_rows = [
+            row
+            for row in fit_rows
+            if float(row["epr_factor"]) >= CROSS_DRIVER_EPR_MIN_FACTOR
+        ]
+
+        if len(training_rows) < 2:
+            raise ValueError(
+                f"Insufficient EPR training points for {spec.technology}"
+            )
+
+        # Normalised capacities.
+        p = np.asarray([
+            float(row["withdrawal_flow_gw_h2_lhv"]) * 1e6 / P0
+            for row in training_rows
+        ])
+
+        e = np.asarray([
+            float(row["storage_capacity_gwh_lhv"]) * 1e6 / E0
+            for row in training_rows
+        ])
+
+        # Detailed withdrawal investment cost (MEUR).
+        y_training = np.asarray([
+            float(row["detailed_component_tcr_meur"])
+            for row in training_rows
+        ])
+
+        # Two free slopes, zero fixed intercept, no reference anchor.
+        beta_P, beta_E = fit_two_driver_cost(
+            own_capacity=p,
+            secondary_capacity=e,
+            detailed_cost=y_training,
         )
-
-        # Reference withdrawal expenditure, MEUR.
-        C0 = float(
-            reference_row["detailed_component_tcr_meur"]
-        )
-
-        # X already contains:
-        # Column 0: P_out / P_out,0
-        # Column 1: E / E_0
-        p = X[:, 0]
-        e = X[:, 1]
-
-        # Fit:
-        # C = beta_P * p + beta_E * e
-        #
-        # Subject to:
-        # beta_P + beta_E = C0
-        #
-        # Substitute beta_P = C0 - beta_E:
-        # C = C0*p + beta_E*(e-p)
-
-        z = e - p
-
-        beta_E = np.dot(
-            z,
-            y - C0 * p,
-        ) / np.dot(z, z)
-
-        beta_P = C0 - beta_E
 
         beta_coupled = np.array([
             beta_P,
             beta_E,
         ])
-
-        # Verify exact reproduction of the reference design.
-        assert np.isclose(
-            beta_coupled.sum(),
-            C0,
-            rtol=1e-10,
-        )
 
         # Affine model, with intercept.
         X_affine = np.column_stack([
@@ -1990,15 +1992,15 @@ def plot_injection_cost_model_comparison(
     rows: list[dict[str, Any]],
     figure_dir: Path,
 ) -> None:
-    """Compare linear cost representations for withdrawal TCR.
+    """Compare linear cost representations for injection TCR.
 
-    Fits use both working-gas capacity and EPR sensitivities.
-    The figure displays predictions along the EPR sensitivity.
+    Fits use the storage-capacity, EPR, and WTIR sensitivities.
+    The figure displays predictions along the WTIR sensitivity.
 
     Models:
       - Constant reference unit rate
-      - Cross-driver linear cost: a*P_out + b*E
-      - Affine cost: F + a*P_out + b*E
+      - Cross-driver linear cost: a*P_in + b*P_out
+      - Affine cost: F + a*P_in + b*P_out
     """
 
     specs = get_selected_specs()
@@ -2014,7 +2016,7 @@ def plot_injection_cost_model_comparison(
 
     for ax, spec in zip(axes, specs):
 
-        # Data to display: EPR variation.
+        # Data to display: WTIR variation.
         wtir_rows = get_rows(
             rows,
             sensitivity="wtir",
@@ -2022,7 +2024,7 @@ def plot_injection_cost_model_comparison(
             component_group="Injection",
         )
 
-        # Fit to both sensitivities, not only the displayed EPR sweep.
+        # Fit to all sensitivities, not just the displayed WTIR sweep.
         fit_rows = []
         for sensitivity in (
             "storage_capacity_gwh_lhv",
@@ -2037,7 +2039,6 @@ def plot_injection_cost_model_comparison(
                     component_group="Injection",
                 )
             )
-
         # Remove duplicated design configurations.
         unique = {}
 
@@ -2074,7 +2075,7 @@ def plot_injection_cost_model_comparison(
         X = np.array([
             [
                 float(r["injection_flow_gw_h2_lhv"]) * 1e6 / P0,
-                float(r["storage_capacity_gwh_lhv"]) * 1e6 / E0,
+                float(r["withdrawal_flow_gw_h2_lhv"]) * 1e6 / P_out0,
             ]
             for r in fit_rows
         ])
@@ -2086,57 +2087,25 @@ def plot_injection_cost_model_comparison(
         ])
 
         # ---------------------------------------------------------
-        # Reference-anchored cross-driver regression
+        # Unanchored cross-driver regression (diagnostic figure).
         # ---------------------------------------------------------
-
-        # Identify the reference design.
-        reference_row = min(
-            wtir_rows,
-            key=lambda r: abs(
-                float(r["wtir"]) - spec.default_wtir
-            ),
-        )
-
-        # Reference withdrawal expenditure, MEUR.
-        C0 = float(
-            reference_row["detailed_component_tcr_meur"]
-        )
 
         # X already contains:
         # Column 0: P_in / P_in,0
-        # Column 1: E / E_0
+        # Column 1: P_out / P_out,0
         p = X[:, 0]
-        e = X[:, 1]
+        p_out = X[:, 1]
 
-        # Fit:
-        # C = beta_P * p + beta_E * e
-        #
-        # Subject to:
-        # beta_P + beta_E = C0
-        #
-        # Substitute beta_P = C0 - beta_E:
-        # C = C0*p + beta_E*(e-p)
-
-        z = e - p
-
-        beta_E = np.dot(
-            z,
-            y - C0 * p,
-        ) / np.dot(z, z)
-
-        beta_P = C0 - beta_E
+        beta_P, beta_P_out = fit_two_driver_cost(
+            own_capacity=p,
+            secondary_capacity=p_out,
+            detailed_cost=y,
+        )
 
         beta_coupled = np.array([
             beta_P,
-            beta_E,
+            beta_P_out,
         ])
-
-        # Verify exact reproduction of the reference design.
-        assert np.isclose(
-            beta_coupled.sum(),
-            C0,
-            rtol=1e-10,
-        )
 
         # Affine model, with intercept.
         X_affine = np.column_stack([
@@ -2148,9 +2117,9 @@ def plot_injection_cost_model_comparison(
             X_affine, y, rcond=None
         )[0]
 
-        # Predict on the displayed EPR sweep.
-        E_plot = np.array([
-            float(r["storage_capacity_gwh_lhv"]) * 1e6
+        # Predict on the displayed WTIR sweep.
+        P_out_plot = np.array([
+            float(r["withdrawal_flow_gw_h2_lhv"]) * 1e6
             for r in wtir_rows
         ])
 
@@ -2171,7 +2140,7 @@ def plot_injection_cost_model_comparison(
 
         X_plot = np.column_stack([
             P_plot / P0,
-            E_plot / E0,
+            P_out_plot / P_out0,
         ])
 
         # Predicted absolute costs (MEUR).
@@ -2185,7 +2154,7 @@ def plot_injection_cost_model_comparison(
             @ beta_affine
         )
 
-        # Convert predicted costs to withdrawal EUR/kW.
+        # Convert predicted costs to injection EUR/kW.
         rate_coupled = cost_coupled * 1e6 / P_plot
         rate_affine = cost_affine * 1e6 / P_plot
 
