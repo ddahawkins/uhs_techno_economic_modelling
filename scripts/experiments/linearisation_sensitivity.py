@@ -155,7 +155,8 @@ DESIGN_POINT_MULTIPLIERS = np.linspace(0.5,1.5,11)
 # Local cross-driver CEM samples are fitted independently over their own
 # EPR/WTIR cells, including cells below 0.9. This plot is a diagnostic of the
 # smoother high-EPR region, not a source of sampler coefficients.
-CROSS_DRIVER_EPR_MIN_FACTOR = 0.9
+CROSS_DRIVER_EPR_MIN_FACTOR = 0.6
+CROSS_DRIVER_EPR_MAX_FACTOR = 1.4
 
 # WTIR is deliberately kept in its natural units rather than normalised.
 WTIR_SWEEP = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0)
@@ -1258,7 +1259,7 @@ def get_fit_model_definitions(
 
     if component_group == "Injection":
         own_driver = (P_IN,)
-        coupled_drivers = (E, P_IN)
+        coupled_drivers = (P_IN, P_OUT)
 
     elif component_group == "Storage":
         own_driver = (E,)
@@ -1330,12 +1331,26 @@ def build_fit_matrix(
 def fit_linear_cost_model(
     X: np.ndarray,
     y: np.ndarray,
+    own_capacity: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Ordinary least squares with column scaling.
+    """Least squares with column scaling and optional own-capacity weighting.
 
-    Scaling improves numerical conditioning because storage capacities
-    in GWh can be much larger numerically than power capacities in GW.
+    For a component group, dividing each row by its own capacity minimises
+    squared *unit-rate* errors (EUR/kW or EUR/kWh). For the combined Total
+    cost, which has no single capacity denominator, the fit remains in MEUR.
     """
+
+    if own_capacity is not None:
+        own_capacity = np.asarray(own_capacity, dtype=float)
+        if (
+            own_capacity.ndim != 1
+            or own_capacity.size != len(y)
+            or not np.all(np.isfinite(own_capacity))
+            or np.any(own_capacity <= 0)
+        ):
+            raise ValueError("Own-capacity values must be finite and positive.")
+        X = X / own_capacity[:, None]
+        y = y / own_capacity
 
     column_scales = np.linalg.norm(X, axis=0)
 
@@ -1359,6 +1374,7 @@ def fit_linear_cost_model(
 def leave_one_out_predictions(
     X: np.ndarray,
     y: np.ndarray,
+    own_capacity: np.ndarray | None = None,
 ) -> np.ndarray:
     """Calculate leave-one-design-point-out predictions."""
 
@@ -1377,6 +1393,7 @@ def leave_one_out_predictions(
         coefficients = fit_linear_cost_model(
             X_train,
             y_train,
+            own_capacity=(own_capacity[mask] if own_capacity is not None else None),
         )
 
         predictions[index] = (
@@ -1466,6 +1483,20 @@ def run_cost_fit_analysis(
 
                 y = get_fit_target(cases, group)
 
+                # Component models are judged in the same units as the CEM
+                # investment coefficients. The combined total has no one
+                # natural per-capacity denominator.
+                own_field = {
+                    "Storage": "storage_capacity_gwh_lhv",
+                    "Injection": "injection_flow_gw_h2_lhv",
+                    "Withdrawal": "withdrawal_flow_gw_h2_lhv",
+                }.get(group)
+                own_capacity = (
+                    np.asarray([float(case[own_field]) for case in cases])
+                    if own_field is not None
+                    else None
+                )
+
                 reference_index = next(
                     (
                         i
@@ -1507,13 +1538,18 @@ def run_cost_fit_analysis(
                         ):
                             continue
 
-                        beta = fit_linear_cost_model(X, y)
+                        beta = fit_linear_cost_model(
+                            X,
+                            y,
+                            own_capacity=own_capacity,
+                        )
 
                         predicted = X @ beta
 
                         cv_predicted = leave_one_out_predictions(
                             X,
                             y,
+                            own_capacity=own_capacity,
                         )
 
                         coefficients = dict(
@@ -1777,7 +1813,7 @@ def plot_withdrawal_cost_model_comparison(
         )
 
         # Fit to both sensitivities, not only the displayed EPR sweep.
-        fit_rows = epr_rows + capacity_rows
+        fit_rows = epr_rows #+ capacity_rows
 
         # Remove duplicated design configurations.
         unique = {}
@@ -1820,7 +1856,7 @@ def plot_withdrawal_cost_model_comparison(
         training_rows = [
             row
             for row in fit_rows
-            if float(row["epr_factor"]) >= CROSS_DRIVER_EPR_MIN_FACTOR
+            if float(row["epr_factor"]) >= CROSS_DRIVER_EPR_MIN_FACTOR and float(row["epr_factor"]) <= CROSS_DRIVER_EPR_MAX_FACTOR
         ]
 
         if len(training_rows) < 2:
@@ -1863,9 +1899,12 @@ def plot_withdrawal_cost_model_comparison(
             X,
         ])
 
-        beta_affine = np.linalg.lstsq(
-            X_affine, y, rcond=None
-        )[0]
+        # Compare on the same unit-rate objective as cross-driver fitting.
+        beta_affine = fit_linear_cost_model(
+            X_affine,
+            y,
+            own_capacity=X[:, 0],
+        )
 
         # Predict on the displayed EPR sweep.
         E_plot = np.array([
@@ -2027,7 +2066,7 @@ def plot_injection_cost_model_comparison(
         # Fit to all sensitivities, not just the displayed WTIR sweep.
         fit_rows = []
         for sensitivity in (
-            "storage_capacity_gwh_lhv",
+            # "storage_capacity_gwh_lhv",
             "epr_days",
             "wtir",
         ):
@@ -2113,9 +2152,12 @@ def plot_injection_cost_model_comparison(
             X,
         ])
 
-        beta_affine = np.linalg.lstsq(
-            X_affine, y, rcond=None
-        )[0]
+        # Compare on the same unit-rate objective as cross-driver fitting.
+        beta_affine = fit_linear_cost_model(
+            X_affine,
+            y,
+            own_capacity=X[:, 0],
+        )
 
         # Predict on the displayed WTIR sweep.
         P_out_plot = np.array([

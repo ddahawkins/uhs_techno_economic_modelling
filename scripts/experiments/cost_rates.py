@@ -15,10 +15,12 @@ Each sample contains:
     - Applicable EPR and WTIR intervals
 
 For the cross-driver method only, coefficients are fitted independently in
-each sample's EPR/WTIR cell, with a small storage-capacity sensitivity to
-identify both slopes. A sample's fitted total need not reproduce the detailed
-cost at its centre; this approximation error is reported rather than removed
-by anchoring.
+each sample's EPR/WTIR cell at the technology's reference storage capacity.
+Varying EPR and WTIR identifies both slopes without introducing an unwanted
+economies-of-scale sensitivity. Least-squares minimises component unit-rate error
+(EUR/kW or EUR/kWh), not absolute project-cost error. A sample's fitted total
+need not reproduce the detailed cost at its centre; this approximation error
+is reported rather than removed by anchoring.
 
 Grid points are bin MIDPOINTS. The reference design is not forced into the
 sample set.
@@ -30,9 +32,15 @@ Run from the repository root:
 
     pixi run python -m scripts.experiments.cost_rates `
         --technology aquifer `
-        --method fully_decoupled_cross_driver `
-        --n-epr 3 `
-        --n-wtir 1
+        --method fully_decoupled `
+        --n-epr 2 `
+        --n-wtir 2 `
+        --plots
+
+The optional PDF diagnostics show (1) each sample's admissible design
+region, (2) source-stage investment rates against the detailed model, and
+(3) the effective total CEM investment cost across EPR/WTIR slices. The
+individual exported CEM coefficients remain constant within each sample.
 """
 
 from __future__ import annotations
@@ -91,10 +99,6 @@ class SamplingConfig:
     # WTIR is an absolute ratio.
     wtir_range: tuple[float, float] = (1.0, 5.0)
 
-    # Only the cross-driver formulation uses this extra capacity sensitivity
-    # to identify coefficients. It does NOT add storage-capacity samples.
-    cross_driver_storage_perturbation: float = 0.10
-
 @dataclass(frozen=True)
 class Interval:
     lower: float
@@ -140,6 +144,12 @@ class FitDiagnostic:
     cost_type: str
     mean_absolute_percentage_error: float
     max_absolute_percentage_error: float
+    # Retain source-stage fits for diagnostic plotting. The CEM itself uses
+    # their sum, aggregated by destination capacity driver.
+    own_driver: CostDriver
+    additional_driver: CostDriver
+    own_coefficient: float
+    additional_coefficient: float
 
 
 @dataclass(frozen=True)
@@ -223,11 +233,6 @@ def validate_config(config: SamplingConfig) -> CostMethod:
                 "with finite values."
             )
 
-
-    if not 0 < config.cross_driver_storage_perturbation < 1:
-        raise ValueError(
-            "cross_driver_storage_perturbation must be strictly between 0 and 1."
-        )
 
     return method
 
@@ -474,14 +479,13 @@ def local_training_cases(
     spec: TechnologySpec,
     epr_factor_interval: Interval,
     wtir_interval: Interval,
-    storage_perturbation: float,
 ) -> list[tuple[dict[CostDriver, float], CostBreakdown]]:
     """Evaluate a small regular grid *inside* one sample's validity cell.
 
-    All three independent design quantities vary. The three EPR and WTIR
+    Storage capacity stays fixed at the reference facility size. EPR and WTIR
     points lie 20%, 50%, and 80% of the way across each interval so we do not
-    evaluate adjacent cells' shared boundaries. The three storage values
-    provide independent scale variation without sampling E in the CEM.
+    evaluate adjacent cells' shared boundaries. These two ratio sensitivities
+    identify both slopes of all three cross-driver cost representations.
 
     No global EPR >= 0.9 cutoff applies: low-EPR samples must learn from
     their own region, including any nonlinear or discontinuous behaviour.
@@ -494,16 +498,10 @@ def local_training_cases(
             for fraction in (0.2, 0.5, 0.8)
         )
 
-    storage_reference = spec.default_storage_capacity_gwh_lhv
-    storage_values = (
-        storage_reference * (1 - storage_perturbation),
-        storage_reference,
-        storage_reference * (1 + storage_perturbation),
-    )
+    storage_gwh = spec.default_storage_capacity_gwh_lhv
 
     cases = []
-    for storage_gwh, epr_factor, wtir in product(
-        storage_values,
+    for epr_factor, wtir in product(
         interior_grid(epr_factor_interval),
         interior_grid(wtir_interval),
     ):
@@ -526,7 +524,7 @@ def fit_local_two_driver(
     own_driver: CostDriver,
     second_driver: CostDriver,
 ) -> tuple[dict[CostDriver, float], FitDiagnostic]:
-    """Fit two unconstrained slopes and report error on local training cases."""
+    """Fit two free slopes in component unit rates and report local errors."""
 
     own = np.asarray([
         capacities[own_driver]
@@ -572,6 +570,10 @@ def fit_local_two_driver(
         max_absolute_percentage_error=(
             float(np.max(percentage_errors)) if percentage_errors.size else 0.0
         ),
+        own_driver=own_driver,
+        additional_driver=second_driver,
+        own_coefficient=float(a),
+        additional_coefficient=float(b),
     )
 
     return {own_driver: a, second_driver: b}, diagnostic
@@ -582,7 +584,6 @@ def cross_driver_cost_mapping(
     capacities: dict[CostDriver, float],
     epr_factor_interval: Interval,
     wtir_interval: Interval,
-    storage_perturbation: float = 0.10,
 ) -> tuple[CostBreakdown, tuple[FitDiagnostic, ...]]:
     """Build an LP-compatible two-slope model for one design-space cell."""
 
@@ -590,7 +591,6 @@ def cross_driver_cost_mapping(
         spec=spec,
         epr_factor_interval=epr_factor_interval,
         wtir_interval=wtir_interval,
-        storage_perturbation=storage_perturbation,
     )
 
     # Detailed source cost -> (primary driver, additional driver).
@@ -758,7 +758,6 @@ def generate_cost_samples(
                 capacities=capacities,
                 epr_factor_interval=epr_factor_interval,
                 wtir_interval=wtir_interval,
-                storage_perturbation=config.cross_driver_storage_perturbation,
             )
 
         else:
@@ -851,6 +850,371 @@ def generate_cost_samples(
 
 
 # =============================================================================
+# Optional visual diagnostics
+# =============================================================================
+
+
+def _centre_capacities(sample: SampledCostSet) -> dict[CostDriver, float]:
+    return {
+        CostDriver.STORAGE: sample.storage_capacity_kwh_lhv,
+        CostDriver.INJECTION: sample.injection_capacity_kw,
+        CostDriver.WITHDRAWAL: sample.withdrawal_capacity_kw,
+    }
+
+
+def _source_capital_cost(
+    breakdown: CostBreakdown,
+    source: CostDriver,
+) -> float:
+    """Detailed investment total (CAPEX + ABEX) of one source stage."""
+    return sum(
+        capital_group_cost(breakdown, typ, source)
+        for typ in CAPITAL_TYPES
+    )
+
+
+def _sample_source_capital_cost(
+    sample: SampledCostSet,
+    source: CostDriver,
+    capacities: dict[CostDriver, float],
+) -> float:
+    """Stage-resolved cost prediction underlying the sample's CEM mapping.
+
+    A bundled sample only represents its centre, where the original stage
+    decomposition is available; the CEM has no stage-specific variables.
+    For cross-driver samples, the retained source fits are aggregated here in
+    exactly the same way as they were aggregated into the exported CEM rates.
+    """
+    if sample.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER:
+        return sum(
+            (
+                diagnostic.own_coefficient
+                * capacities[diagnostic.own_driver]
+                + diagnostic.additional_coefficient
+                * capacities[diagnostic.additional_driver]
+            )
+            for diagnostic in sample.cross_driver_diagnostics
+            if diagnostic.group == source.value
+        )
+
+    driver = source
+    if sample.method == CostMethod.BUNDLED:
+        driver = CostDriver.STORAGE
+    elif (
+        sample.method == CostMethod.PARTIALLY_DECOUPLED
+        and source == CostDriver.INJECTION
+    ):
+        driver = CostDriver.WITHDRAWAL
+
+    centre = _centre_capacities(sample)
+    return (
+        _source_capital_cost(sample.detailed_breakdown, source)
+        * capacities[driver]
+        / centre[driver]
+    )
+
+
+def _sample_total_capital_cost(
+    sample: SampledCostSet,
+    capacities: dict[CostDriver, float],
+) -> float:
+    """Apply the *exported* constant CEM investment coefficients."""
+    return (
+        sample.tcr_rates.storage * capacities[CostDriver.STORAGE]
+        + sample.tcr_rates.injection * capacities[CostDriver.INJECTION]
+        + sample.tcr_rates.withdrawal * capacities[CostDriver.WITHDRAWAL]
+    )
+
+
+def _sampling_slices(
+    samples: list[SampledCostSet],
+    spec: TechnologySpec,
+    n_points: int,
+) -> dict[str, list[tuple[float, list[tuple[float, dict[CostDriver, float], CostBreakdown]]]]]:
+    """Cache detailed EPR/WTIR sweeps for all figures (no repeated solves)."""
+    if n_points < 3:
+        raise ValueError("plot_points must be >= 3.")
+
+    epr_min = min(s.epr_interval_days.lower for s in samples)
+    epr_max = max(s.epr_interval_days.upper for s in samples)
+    wtir_min = min(s.wtir_interval.lower for s in samples)
+    wtir_max = max(s.wtir_interval.upper for s in samples)
+    epr_centres = sorted({s.epr_days for s in samples})
+    wtir_centres = sorted({s.wtir for s in samples})
+
+    sweeps = {"epr": [], "wtir": []}
+    for fixed_wtir in wtir_centres:
+        rows = []
+        for epr_days in np.linspace(epr_min, epr_max, n_points):
+            epr_days = float(epr_days)
+            capacities = design_capacities(spec, epr_days, fixed_wtir)
+            detailed = evaluate_design(
+                spec,
+                spec.default_storage_capacity_gwh_lhv,
+                epr_days,
+                fixed_wtir,
+            )
+            rows.append((epr_days, capacities, detailed))
+        sweeps["epr"].append((fixed_wtir, rows))
+
+    for fixed_epr in epr_centres:
+        rows = []
+        for wtir in np.linspace(wtir_min, wtir_max, n_points):
+            wtir = float(wtir)
+            capacities = design_capacities(spec, fixed_epr, wtir)
+            detailed = evaluate_design(
+                spec,
+                spec.default_storage_capacity_gwh_lhv,
+                fixed_epr,
+                wtir,
+            )
+            rows.append((wtir, capacities, detailed))
+        sweeps["wtir"].append((fixed_epr, rows))
+
+    return sweeps
+
+
+def _sample_plot_coordinates(
+    sample: SampledCostSet,
+    axis: str,
+    n_points: int,
+) -> list[tuple[float, float, float]]:
+    """(horizontal coordinate, EPR days, WTIR) permitted by one variant."""
+    if axis == "epr":
+        flexible = sample.method != CostMethod.BUNDLED
+        values = (
+            np.linspace(
+                sample.epr_interval_days.lower,
+                sample.epr_interval_days.upper,
+                n_points,
+            )
+            if flexible else [sample.epr_days]
+        )
+        return [(float(d), float(d), sample.wtir) for d in values]
+
+    if axis == "wtir":
+        flexible = sample.method in (
+            CostMethod.FULLY_DECOUPLED,
+            CostMethod.FULLY_DECOUPLED_CROSS_DRIVER,
+        )
+        values = (
+            np.linspace(
+                sample.wtir_interval.lower,
+                sample.wtir_interval.upper,
+                n_points,
+            )
+            if flexible else [sample.wtir]
+        )
+        return [(float(w), sample.epr_days, float(w)) for w in values]
+
+    raise ValueError(f"Unknown plot axis: {axis}")
+
+
+def write_sample_plots(
+    samples: list[SampledCostSet],
+    output_dir: str | Path,
+    plot_points: int = 25,
+) -> tuple[Path, Path, Path]:
+    """Write three PDFs showing design coverage and investment fidelity.
+
+    1. Coverage: points (bundled), horizontal segments (partially decoupled),
+       or EPR x WTIR rectangles (both fully decoupled formulations).
+    2. Source stages: the original storage/injection/withdrawal investment
+       rates, and the stage-resolved rates implied by each sample's mapping.
+       Stage attribution is diagnostic; it is not a CEM variable split for
+       bundled or partially decoupled representations.
+    3. Total: the detailed total TCR versus the exact *exported* CEM rate
+       coefficients, both expressed in EUR/kWh of installed working gas.
+
+    All curves hold storage capacity at the technology's reference value.
+    Reference curves are evaluated anew; the sampler's local training cases
+    and the plot sweep are distinct datasets.
+    """
+    if not samples:
+        raise ValueError("Cannot plot an empty sample collection.")
+    if len({(s.technology, s.method) for s in samples}) != 1:
+        raise ValueError("Plot one technology and one sampling method at a time.")
+
+    # Imported lazily so ordinary CSV/sample generation needs no plotting backend.
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Rectangle
+
+    spec = get_technology(samples[0].technology)
+    method = samples[0].method
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_epr = len({s.epr_days for s in samples})
+    n_wtir = len({s.wtir for s in samples})
+    prefix = f"{spec.technology}__{method.value}__{n_epr}x{n_wtir}"
+    output_paths = (
+        output_dir / f"{prefix}__coverage.pdf",
+        output_dir / f"{prefix}__source_tcr.pdf",
+        output_dir / f"{prefix}__total_tcr.pdf",
+    )
+
+    colours = plt.get_cmap("tab20", max(len(samples), 1))
+    palette = {s.sample_id: colours(i) for i, s in enumerate(samples)}
+
+    # Figure 1: sample regions in EPR/WTIR design space.
+    fig, ax = plt.subplots(figsize=(9, 5.6), constrained_layout=True)
+    for sample in samples:
+        colour = palette[sample.sample_id]
+        if method == CostMethod.BUNDLED:
+            ax.scatter(sample.epr_days, sample.wtir, s=65, color=colour, zorder=4)
+        elif method == CostMethod.PARTIALLY_DECOUPLED:
+            ax.plot(
+                [sample.epr_interval_days.lower, sample.epr_interval_days.upper],
+                [sample.wtir, sample.wtir],
+                color=colour, linewidth=4, solid_capstyle="butt", zorder=2,
+            )
+        else:
+            ax.add_patch(Rectangle(
+                (sample.epr_interval_days.lower, sample.wtir_interval.lower),
+                sample.epr_interval_days.upper - sample.epr_interval_days.lower,
+                sample.wtir_interval.upper - sample.wtir_interval.lower,
+                facecolor=colour, edgecolor=colour, alpha=0.20, linewidth=1.5,
+            ))
+        ax.plot(sample.epr_days, sample.wtir, marker="o", markersize=4,
+                color=colour, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+        ax.annotate(
+            sample.sample_id.rsplit("__", 1)[-1].replace("_", "/"),
+            (sample.epr_days, sample.wtir), xytext=(5, 6),
+            textcoords="offset points", fontsize=7, color="black",
+        )
+    ax.set(xlabel="EPR (days)", ylabel="WTIR (withdrawal / injection)",
+           title=f"{spec.technology} | {method.value} | sample applicability")
+    ax.grid(alpha=0.17)
+    ax.set_axisbelow(True)
+    fig.savefig(output_paths[0], bbox_inches="tight")
+    plt.close(fig)
+
+    sweeps = _sampling_slices(samples, spec, plot_points)
+    stage_order = (CostDriver.STORAGE, CostDriver.INJECTION, CostDriver.WITHDRAWAL)
+    stage_labels = {
+        CostDriver.STORAGE: ("Storage source TCR", "EUR/kWh"),
+        CostDriver.INJECTION: ("Injection source TCR", "EUR/kW"),
+        CostDriver.WITHDRAWAL: ("Withdrawal source TCR", "EUR/kW"),
+    }
+    legends = [
+        Line2D([0], [0], color="0.55", linewidth=2, label="Detailed model (fixed other ratio)"),
+        Line2D([0], [0], color="tab:blue", linewidth=2.2, label="Sample prediction within interval"),
+        Line2D([0], [0], color="tab:blue", marker="o", linestyle="none",
+               label="Sample centre"),
+    ]
+
+    # Figure 2: stage-level investment rates. These stage decompositions are
+    # recovered from the original components/fits, not from destination rates.
+    fig, axes = plt.subplots(3, 2, figsize=(13, 10.2), constrained_layout=True)
+    for col, axis in enumerate(("epr", "wtir")):
+        axes[0, col].set_title(
+            "Vary EPR at each WTIR centre"
+            if axis == "epr" else "Vary WTIR at each EPR centre",
+            fontsize=10,
+        )
+        for _, rows in sweeps[axis]:
+            xs = [row[0] for row in rows]
+            for row_index, source in enumerate(stage_order):
+                ys = [
+                    _source_capital_cost(detailed, source) / capacities[source]
+                    for _, capacities, detailed in rows
+                ]
+                axes[row_index, col].plot(xs, ys, color="0.70", linewidth=1.5,
+                                          alpha=0.75, zorder=1)
+
+        for sample in samples:
+            points = _sample_plot_coordinates(sample, axis, plot_points)
+            xs = [p[0] for p in points]
+            centre_x = sample.epr_days if axis == "epr" else sample.wtir
+            centre_caps = _centre_capacities(sample)
+            colour = palette[sample.sample_id]
+            for row_index, source in enumerate(stage_order):
+                ys = []
+                for _, epr_days, wtir in points:
+                    caps = design_capacities(spec, epr_days, wtir)
+                    ys.append(_sample_source_capital_cost(sample, source, caps) / caps[source])
+                ax = axes[row_index, col]
+                if len(points) > 1:
+                    ax.plot(xs, ys, color=colour, linewidth=2.3, zorder=3)
+                ax.scatter(
+                    [centre_x],
+                    [_sample_source_capital_cost(sample, source, centre_caps)
+                     / centre_caps[source]],
+                    s=20, color=colour, edgecolors="black", linewidths=0.35,
+                    zorder=4,
+                )
+
+            for row_index, source in enumerate(stage_order):
+                ax = axes[row_index, col]
+                label, unit = stage_labels[source]
+                if col == 0:
+                    ax.set_ylabel(f"{label} ({unit})")
+                if row_index == 2:
+                    ax.set_xlabel("EPR (days)" if axis == "epr" else "WTIR")
+                ax.grid(alpha=0.16)
+    fig.suptitle(
+        f"{spec.technology} | {method.value} | reconstructed source-stage TCR\n"
+        "CAPEX + ABEX; stage attribution is diagnostic, not always a CEM decision variable",
+        fontsize=13,
+    )
+    fig.legend(handles=legends, loc="outside lower center",
+               ncol=3, frameon=False, fontsize=9)
+    fig.savefig(output_paths[1], bbox_inches="tight")
+    plt.close(fig)
+
+    # Figure 3: compare the entire CEM investment expression with the
+    # detailed cost, including the allocation across all three capacities.
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), constrained_layout=True)
+    for col, axis in enumerate(("epr", "wtir")):
+        ax = axes[col]
+        ax.set_title(
+            "Vary EPR at each WTIR centre"
+            if axis == "epr" else "Vary WTIR at each EPR centre",
+            fontsize=10,
+        )
+        for _, rows in sweeps[axis]:
+            ax.plot(
+                [row[0] for row in rows],
+                [
+                    sum(_source_capital_cost(detailed, source)
+                        for source in stage_order) / capacities[CostDriver.STORAGE]
+                    for _, capacities, detailed in rows
+                ],
+                color="0.70", linewidth=1.6, alpha=0.75, zorder=1,
+            )
+        for sample in samples:
+            points = _sample_plot_coordinates(sample, axis, plot_points)
+            xs, ys = [], []
+            for x, epr_days, wtir in points:
+                caps = design_capacities(spec, epr_days, wtir)
+                xs.append(x)
+                ys.append(_sample_total_capital_cost(sample, caps) / caps[CostDriver.STORAGE])
+            colour = palette[sample.sample_id]
+            if len(points) > 1:
+                ax.plot(xs, ys, color=colour, linewidth=2.3, zorder=3)
+            centre_x = sample.epr_days if axis == "epr" else sample.wtir
+            centre_caps = _centre_capacities(sample)
+            ax.scatter(
+                [centre_x],
+                [_sample_total_capital_cost(sample, centre_caps)
+                 / centre_caps[CostDriver.STORAGE]],
+                s=22, color=colour, edgecolors="black", linewidths=0.4,
+                zorder=4,
+            )
+        ax.set_xlabel("EPR (days)" if axis == "epr" else "WTIR")
+        ax.set_ylabel("Total investment / working-gas capacity (EUR/kWh)")
+        ax.grid(alpha=0.16)
+    fig.suptitle(f"{spec.technology} | {method.value} | effective total TCR",
+                 fontsize=13)
+    fig.legend(handles=legends, loc="outside lower center",
+               ncol=3, frameon=False, fontsize=9)
+    fig.savefig(output_paths[2], bbox_inches="tight")
+    plt.close(fig)
+
+    return output_paths
+
+
+# =============================================================================
 # Optional CSV export
 # =============================================================================
 
@@ -939,18 +1303,29 @@ def main() -> None:
     parser.add_argument("--epr-max-factor", type=float, default=1.5)
     parser.add_argument("--wtir-min", type=float, default=1.0)
     parser.add_argument("--wtir-max", type=float, default=5.0)
-    parser.add_argument(
-        "--cross-driver-storage-perturbation",
-        type=float,
-        default=0.10,
-        help="Fractional +/- E perturbation for local cross-driver regression only.",
-    )
 
     parser.add_argument(
         "--csv",
         type=Path,
         default=None,
         help="Optional CSV summary destination.",
+    )
+    parser.add_argument(
+        "--plots",
+        action="store_true",
+        help="Generate PDF design-space, source-TCR and total-TCR diagnostics.",
+    )
+    parser.add_argument(
+        "--plot-dir",
+        type=Path,
+        default=None,
+        help="PDF output directory; supplying this also enables plotting.",
+    )
+    parser.add_argument(
+        "--plot-points",
+        type=int,
+        default=25,
+        help="Detailed-model evaluations per EPR/WTIR reference slice (default: 25).",
     )
 
     args = parser.parse_args()
@@ -967,9 +1342,6 @@ def main() -> None:
         wtir_range=(
             args.wtir_min,
             args.wtir_max,
-        ),
-        cross_driver_storage_perturbation=(
-            args.cross_driver_storage_perturbation
         ),
     )
 
@@ -993,6 +1365,15 @@ def main() -> None:
     if args.csv is not None:
         write_sample_summary(samples, args.csv)
         print(f"Saved {len(samples)} samples to {args.csv}")
+
+    if args.plots or args.plot_dir is not None:
+        plot_dir = args.plot_dir or (
+            Path("outputs") / "cost_rate_plots"
+            / f"{config.technology}__{CostMethod(config.method).value}"
+        )
+        paths = write_sample_plots(samples, plot_dir, args.plot_points)
+        for path in paths:
+            print(f"Saved plot: {path}")
 
 
 if __name__ == "__main__":
