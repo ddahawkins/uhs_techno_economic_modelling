@@ -74,15 +74,34 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-from uhs_costs.design.aquifer import construct_project as construct_aquifer_project
+from uhs_costs.design.aquifer import (
+    construct_project as construct_aquifer_project,
+    ASSUMPTIONS as AQUIFER_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as AQUIFER_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as AQUIFER_REFERENCE_EPR,
+    REFERENCE_WTIR as AQUIFER_REFERENCE_WTIR
+    )
+
 from uhs_costs.design.depleted_gas_field import (
     construct_project as construct_dgf_project,
+    ASSUMPTIONS as DGF_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as DGF_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as DGF_REFERENCE_EPR,
+    REFERENCE_WTIR as DGF_REFERENCE_WTIR
 )
 from uhs_costs.design.lined_rock_cavern import (
     construct_project as construct_lrc_project,
+    ASSUMPTIONS as LRC_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as LRC_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as LRC_REFERENCE_EPR,
+    REFERENCE_WTIR as LRC_REFERENCE_WTIR
 )
 from uhs_costs.design.salt_cavern import (
     construct_project as construct_salt_cavern_project,
+    ASSUMPTIONS as SC_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as SC_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as SC_REFERENCE_EPR,
+    REFERENCE_WTIR as SC_REFERENCE_WTIR
 )
 
 from uhs_costs.cost_model.aquifer import (
@@ -149,13 +168,16 @@ class TechnologySpec:
     project_constructor: Callable[..., Any]
     cost_function: Callable[..., Any]
 
+    design_assumptions: Any
+
     # Reference facility used to derive the fixed linear CEM coefficients.
     default_storage_capacity_gwh_lhv: float
     default_epr_days: float
     default_wtir: float
 
 
-# Defaults reproduce scripts/cost_rates.py.
+# Reference designs are imported from the technology-specific constructors.
+# These are the authoritative reference assumptions for this experiment.
 TECHNOLOGIES: tuple[TechnologySpec, ...] = (
     TechnologySpec(
         technology="salt_cavern",
@@ -163,9 +185,10 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="salt_cavern",
         project_constructor=construct_salt_cavern_project,
         cost_function=calculate_salt_cavern_cost_components,
-        default_storage_capacity_gwh_lhv=397.36,
-        default_epr_days=12.0,
-        default_wtir=2.0,
+        design_assumptions=SC_DESIGN_ASSUMPTIONS,
+        default_storage_capacity_gwh_lhv=SC_REFERENCE_CAPACITY,
+        default_epr_days=SC_REFERENCE_EPR,
+        default_wtir=SC_REFERENCE_WTIR,
     ),
     TechnologySpec(
         technology="depleted_gas_field",
@@ -173,9 +196,10 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="depleted_gas_field",
         project_constructor=construct_dgf_project,
         cost_function=calculate_depleted_gas_field_cost_components,
-        default_storage_capacity_gwh_lhv=9605.75,
-        default_epr_days=66.0,
-        default_wtir=2.0,
+        design_assumptions=DGF_DESIGN_ASSUMPTIONS,
+        default_storage_capacity_gwh_lhv=DGF_REFERENCE_CAPACITY,
+        default_epr_days=DGF_REFERENCE_EPR,
+        default_wtir=DGF_REFERENCE_WTIR,
     ),
     TechnologySpec(
         technology="aquifer",
@@ -183,9 +207,10 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="aquifer",
         project_constructor=construct_aquifer_project,
         cost_function=calculate_aquifer_cost_components,
-        default_storage_capacity_gwh_lhv=5032.31,
-        default_epr_days=66.0,
-        default_wtir=2.0,
+        design_assumptions=AQUIFER_DESIGN_ASSUMPTIONS,
+        default_storage_capacity_gwh_lhv=AQUIFER_REFERENCE_CAPACITY,
+        default_epr_days=AQUIFER_REFERENCE_EPR,
+        default_wtir=AQUIFER_REFERENCE_WTIR,
     ),
     TechnologySpec(
         technology="lined_rock_cavern",
@@ -193,9 +218,10 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="lined_rock_cavern",
         project_constructor=construct_lrc_project,
         cost_function=calculate_lined_rock_cavern_cost_components,
-        default_storage_capacity_gwh_lhv=21.33,
-        default_epr_days=8.0,
-        default_wtir=2.0,
+        design_assumptions=LRC_DESIGN_ASSUMPTIONS,
+        default_storage_capacity_gwh_lhv=LRC_REFERENCE_CAPACITY,
+        default_epr_days=LRC_REFERENCE_EPR,
+        default_wtir=LRC_REFERENCE_WTIR,
     ),
 )
 
@@ -351,6 +377,7 @@ def construct_project(
         working_gas_capacity_kwh_lhv=storage_capacity_gwh_lhv * 1_000_000.0,
         withdrawal_flow_kw_h2_lhv=withdrawal_kw,
         injection_flow_kw_h2_lhv=injection_kw,
+        assumptions=spec.design_assumptions,
         case_name=spec.case_name,
     )
 
@@ -2052,7 +2079,7 @@ def plot_injection_cost_model_comparison(
             for r in fit_rows
         ])
 
-        # Detailed withdrawal investment cost, MEUR.
+        # Detailed injection investment cost, MEUR.
         y = np.array([
             float(r["detailed_component_tcr_meur"])
             for r in fit_rows
@@ -2076,7 +2103,7 @@ def plot_injection_cost_model_comparison(
         )
 
         # X already contains:
-        # Column 0: P_out / P_out,0
+        # Column 0: P_in / P_in,0
         # Column 1: E / E_0
         p = X[:, 0]
         e = X[:, 1]

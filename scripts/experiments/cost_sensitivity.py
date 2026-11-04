@@ -98,20 +98,33 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from uhs_costs.design.aquifer import (
-    ASSUMPTIONS as AQUIFER_DESIGN_ASSUMPTIONS,
     construct_project as construct_aquifer_project,
-)
+    ASSUMPTIONS as AQUIFER_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as AQUIFER_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as AQUIFER_REFERENCE_EPR,
+    REFERENCE_WTIR as AQUIFER_REFERENCE_WTIR
+    )
+
 from uhs_costs.design.depleted_gas_field import (
-    ASSUMPTIONS as DGF_DESIGN_ASSUMPTIONS,
     construct_project as construct_dgf_project,
+    ASSUMPTIONS as DGF_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as DGF_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as DGF_REFERENCE_EPR,
+    REFERENCE_WTIR as DGF_REFERENCE_WTIR
 )
 from uhs_costs.design.lined_rock_cavern import (
-    ASSUMPTIONS as LRC_DESIGN_ASSUMPTIONS,
     construct_project as construct_lrc_project,
+    ASSUMPTIONS as LRC_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as LRC_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as LRC_REFERENCE_EPR,
+    REFERENCE_WTIR as LRC_REFERENCE_WTIR
 )
 from uhs_costs.design.salt_cavern import (
-    ASSUMPTIONS as SALT_DESIGN_ASSUMPTIONS,
     construct_project as construct_salt_cavern_project,
+    ASSUMPTIONS as SC_DESIGN_ASSUMPTIONS,
+    REFERENCE_CAPACITY_GWH_LHV as SC_REFERENCE_CAPACITY,
+    REFERENCE_EPR_DAYS as SC_REFERENCE_EPR,
+    REFERENCE_WTIR as SC_REFERENCE_WTIR
 )
 from uhs_costs.design.default_design_assumptions import (
     calculate_temperature_from_depth_k,
@@ -230,24 +243,72 @@ REFERENCE_FACILITY_RANGES: dict[str, ReferenceFacilityRange] = {
     # They are not executed by this broad exogenous-cost screen; E/EPR/WTIR are
     # explored in linearisation_sensitivity.py.
     "salt_cavern": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(397.36/2, 397.36, 397.36*1.5),
-        epr_days=(6.0, 12.0, 18.0),
-        wtir=(1.0, 2.0, 3.0),
+        storage_capacity_gwh_lhv=(
+            SC_REFERENCE_CAPACITY * 0.5,
+            SC_REFERENCE_CAPACITY,
+            SC_REFERENCE_CAPACITY * 1.5,
+        ),
+        epr_days=(
+            SC_REFERENCE_EPR * 0.5,
+            SC_REFERENCE_EPR,
+            SC_REFERENCE_EPR * 1.5,
+        ),
+        wtir=(
+            SC_REFERENCE_WTIR * 0.5,
+            SC_REFERENCE_WTIR,
+            SC_REFERENCE_WTIR * 1.5,
+        ),
     ),
     "depleted_gas_field": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(9605.75/2, 9605.75, 9605.75*1.5),
-        epr_days=(33.0, 66.0, 100.0),
-        wtir=(1.0, 2.0, 3.0),
+        storage_capacity_gwh_lhv=(
+                    DGF_REFERENCE_CAPACITY * 0.5,
+                    DGF_REFERENCE_CAPACITY,
+                    DGF_REFERENCE_CAPACITY * 1.5,
+                ),
+                epr_days=(
+                    DGF_REFERENCE_EPR * 0.5,
+                    DGF_REFERENCE_EPR,
+                    DGF_REFERENCE_EPR * 1.5,
+                ),
+                wtir=(
+                    DGF_REFERENCE_WTIR * 0.5,
+                    DGF_REFERENCE_WTIR,
+                    DGF_REFERENCE_WTIR * 1.5,
+                ),
     ),
     "aquifer": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(5032.31/2, 5032.31, 5032.31*1.5),
-        epr_days=(33.0, 66.0, 100.0),
-        wtir=(1.0, 2.0, 3.0),
+        storage_capacity_gwh_lhv=(
+                    AQUIFER_REFERENCE_CAPACITY * 0.5,
+                    AQUIFER_REFERENCE_CAPACITY,
+                    AQUIFER_REFERENCE_CAPACITY * 1.5,
+                ),
+                epr_days=(
+                    AQUIFER_REFERENCE_EPR * 0.5,
+                    AQUIFER_REFERENCE_EPR,
+                    AQUIFER_REFERENCE_EPR * 1.5,
+                ),
+                wtir=(
+                    AQUIFER_REFERENCE_WTIR * 0.5,
+                    AQUIFER_REFERENCE_WTIR,
+                    AQUIFER_REFERENCE_WTIR * 1.5,
+                ),
     ),
     "lined_rock_cavern": ReferenceFacilityRange(
-        storage_capacity_gwh_lhv=(21.33/2, 21.33, 21.33*1.5),
-        epr_days=(5.0, 7.5, 10.0),
-        wtir=(1.0, 2.0, 3.0),
+        storage_capacity_gwh_lhv=(
+                    LRC_REFERENCE_CAPACITY * 0.5,
+                    LRC_REFERENCE_CAPACITY,
+                    LRC_REFERENCE_CAPACITY * 1.5,
+                ),
+                epr_days=(
+                    LRC_REFERENCE_EPR * 0.5,
+                    LRC_REFERENCE_EPR,
+                    LRC_REFERENCE_EPR * 1.5,
+                ),
+                wtir=(
+                    LRC_REFERENCE_WTIR * 0.5,
+                    LRC_REFERENCE_WTIR,
+                    LRC_REFERENCE_WTIR * 1.5,
+                ),
     ),
 }
 
@@ -273,7 +334,7 @@ TECHNOLOGIES: tuple[TechnologySpec, ...] = (
         case_name="salt_cavern",
         project_constructor=construct_salt_cavern_project,
         cost_function=calculate_salt_cavern_cost_components,
-        design_assumptions=SALT_DESIGN_ASSUMPTIONS,
+        design_assumptions=SC_DESIGN_ASSUMPTIONS,
         default_storage_capacity_gwh_lhv=REFERENCE_FACILITY_RANGES[
             "salt_cavern"
         ].storage_capacity_gwh_lhv[1],
@@ -338,20 +399,23 @@ RESERVOIR_STORAGE_CLASS_TO_TECHNOLOGY: dict[str, str] = {
 
 # Shared medoid design coordinates for the broad factor screen and the
 # site-specific reference comparison. Abandonment pressure applies to DGF only.
-RESERVOIR_SAMPLE_REFERENCE_DESIGNS: dict[str, dict[str, float]] = {
-    "depleted_gas_field": {"reference_reservoir_depth_m": 1100.,
-                           "minimum_operating_pressure_pa": 77.4e5,
-                           "maximum_operating_pressure_pa": 142.2e5,
-                           "abandonment_pressure_pa": 68.65e5},
-    "aquifer": {"reference_reservoir_depth_m": 720.,
-                "minimum_operating_pressure_pa": 71e5,
-                "maximum_operating_pressure_pa": 106e5},
-    "salt_cavern": {"reference_reservoir_depth_m": 1017.0,
-                    "minimum_operating_pressure_pa": 33e5,
-                    "maximum_operating_pressure_pa": 204e5,},
-    "lined_rock_cavern": {"reference_reservoir_depth_m": 115.,
-                          "minimum_operating_pressure_pa": 30e5,
-                          "maximum_operating_pressure_pa": 230e5},
+RESERVOIR_SAMPLE_REFERENCE_DESIGNS: dict[str, dict[str, float | None]] = {
+    "depleted_gas_field": {"reference_reservoir_depth_m": DGF_DESIGN_ASSUMPTIONS.general.reference_reservoir_depth_m,
+                           "minimum_operating_pressure_pa": DGF_DESIGN_ASSUMPTIONS.general.minimum_operating_pressure_pa,
+                           "maximum_operating_pressure_pa": DGF_DESIGN_ASSUMPTIONS.general.maximum_operating_pressure_pa,
+                           "abandonment_pressure_pa": DGF_DESIGN_ASSUMPTIONS.general.abandonment_pressure_pa},
+
+    "aquifer": {"reference_reservoir_depth_m": AQUIFER_DESIGN_ASSUMPTIONS.general.reference_reservoir_depth_m,
+                "minimum_operating_pressure_pa": AQUIFER_DESIGN_ASSUMPTIONS.general.minimum_operating_pressure_pa,
+                "maximum_operating_pressure_pa": AQUIFER_DESIGN_ASSUMPTIONS.general.maximum_operating_pressure_pa},
+                
+    "salt_cavern": {"reference_reservoir_depth_m": SC_DESIGN_ASSUMPTIONS.general.reference_reservoir_depth_m,
+                    "minimum_operating_pressure_pa": SC_DESIGN_ASSUMPTIONS.general.minimum_operating_pressure_pa,
+                    "maximum_operating_pressure_pa": SC_DESIGN_ASSUMPTIONS.general.maximum_operating_pressure_pa,},
+
+    "lined_rock_cavern": {"reference_reservoir_depth_m": LRC_DESIGN_ASSUMPTIONS.general.reference_reservoir_depth_m,
+                          "minimum_operating_pressure_pa": LRC_DESIGN_ASSUMPTIONS.general.minimum_operating_pressure_pa,
+                          "maximum_operating_pressure_pa": LRC_DESIGN_ASSUMPTIONS.general.maximum_operating_pressure_pa},
 }
 
 
@@ -793,18 +857,18 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
             SensitivityOverride(
                 override_scope="design_technology",
                 parameter="number_production_well_heads",
-                low={"depleted_gas_field": 17,"aquifer": 29},
-                default={"depleted_gas_field": 33,"aquifer": 58},
-                high={"depleted_gas_field": 50,"aquifer": 87},
+                low={"depleted_gas_field": int(round(DGF_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads*0.5,0)),"aquifer": int(round(AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads*0.5,0))},
+                default={"depleted_gas_field": DGF_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads,"aquifer": AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads},
+                high={"depleted_gas_field": int(round(DGF_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads*1.5,0)),"aquifer": int(round(AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_production_well_heads*1.5,0))},
                 unit="wells",
                 integer=True,
             ),
             SensitivityOverride(
                 override_scope="design_technology",
                 parameter="number_observation_well_heads",
-                low={"depleted_gas_field": 3,"aquifer": 8},
-                default={"depleted_gas_field": 5,"aquifer": 16},
-                high={"depleted_gas_field": 8,"aquifer": 24},
+                low={"depleted_gas_field": int(round(DGF_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads*0.5,0)),"aquifer": int(round(AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads*0.5,0))},
+                                default={"depleted_gas_field": DGF_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads,"aquifer": AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads},
+                                high={"depleted_gas_field": int(round(DGF_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads*1.5,0)),"aquifer": int(round(AQUIFER_DESIGN_ASSUMPTIONS.technology_specific.number_observation_well_heads*1.5,0))},
                 unit="wells",
                 integer=True,
             ),
