@@ -32,8 +32,8 @@ Run from the repository root:
 
     pixi run python -m scripts.experiments.cost_rates `
         --technology aquifer `
-        --method fully_decoupled `
-        --n-epr 2 `
+        --method fully_decoupled_cross_driver `
+        --n-epr 3 `
         --n-wtir 2 `
         --plots
 
