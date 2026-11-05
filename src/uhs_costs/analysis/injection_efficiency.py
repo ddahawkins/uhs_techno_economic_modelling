@@ -128,7 +128,7 @@ def pressure_at_soc_profile(
     # Use an intentionally generous upper bound. The pressure solver expands
     # this if required, but this keeps the first guess sensible.
     h2_upper_bound_kg = (
-        project.inventory.working_gas_capacity_kwh_lhv
+        project.inventory.physical_working_gas_capacity_kwh_lhv
         / HYDROGEN_LHV_KWH_PER_KG
         * 2
     )
