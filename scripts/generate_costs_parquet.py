@@ -98,16 +98,17 @@ class Experiment:
     n_epr: int
     n_wtir: int
     epr_factor_range: tuple[float, float] = (0.5, 1.5)
-    wtir_range: tuple[float, float] = (1.0, 5.0)
+    wtir_range: tuple[float, float] = (1.0, 4.0)
 
 
 EXPERIMENTS = (
     Experiment("B1", "bundled", 1, 1),
-    Experiment("B30", "bundled", 6, 5),
-    Experiment("PD1", "partially_decoupled", 1, 1),
-    Experiment("FD1", "fully_decoupled", 1, 1),
+    Experiment("B25", "bundled", 5, 5),
+    Experiment("P1", "partially_decoupled", 1, 1),
+    Experiment("F1", "fully_decoupled", 1, 1),
     Experiment("FX1", "fully_decoupled_cross_driver", 1, 1),
-    Experiment("FX6", "fully_decoupled_cross_driver", 3, 2),
+    Experiment("FX2", "fully_decoupled_cross_driver", 2, 1),
+    Experiment("FX4", "fully_decoupled_cross_driver", 2, 2),
 )
 
 

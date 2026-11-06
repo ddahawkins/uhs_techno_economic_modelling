@@ -32,9 +32,9 @@ Run from the repository root:
 
     pixi run python -m scripts.experiments.cost_rates `
         --technology aquifer `
-        --method fully_decoupled_cross_driver `
+        --method bundled `
         --n-epr 3 `
-        --n-wtir 2 `
+        --n-wtir 3 `
         --plots
 
 The optional PDF diagnostics show (1) each sample's admissible design
@@ -97,7 +97,7 @@ class SamplingConfig:
     epr_factor_range: tuple[float, float] = (0.5, 1.5)
 
     # WTIR is an absolute ratio.
-    wtir_range: tuple[float, float] = (1.0, 5.0)
+    wtir_range: tuple[float, float] = (1.0, 4.0)
 
 @dataclass(frozen=True)
 class Interval:
@@ -1302,7 +1302,7 @@ def main() -> None:
     parser.add_argument("--epr-min-factor", type=float, default=0.5)
     parser.add_argument("--epr-max-factor", type=float, default=1.5)
     parser.add_argument("--wtir-min", type=float, default=1.0)
-    parser.add_argument("--wtir-max", type=float, default=5.0)
+    parser.add_argument("--wtir-max", type=float, default=4.0)
 
     parser.add_argument(
         "--csv",
