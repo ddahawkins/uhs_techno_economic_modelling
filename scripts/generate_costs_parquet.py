@@ -103,7 +103,7 @@ class Experiment:
 
 EXPERIMENTS = (
     Experiment("B1", "bundled", 1, 1),
-    Experiment("B25", "bundled", 5, 5),
+    Experiment("B9", "bundled", 3, 3),
     Experiment("P1", "partially_decoupled", 1, 1),
     Experiment("F1", "fully_decoupled", 1, 1),
     Experiment("FX1", "fully_decoupled_cross_driver", 1, 1),

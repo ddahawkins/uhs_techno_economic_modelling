@@ -33,13 +33,17 @@ Run from the repository root:
     pixi run python -m scripts.experiments.cost_rates `
         --technology aquifer `
         --method bundled `
-        --n-epr 3 `
-        --n-wtir 3 `
-        --plots
+        --n-epr 10 `
+        --n-wtir 10 `
+        --plots `
+        --png
 
 The optional PDF diagnostics show (1) each sample's admissible design
 region, (2) source-stage investment rates against the detailed model, and
-(3) the effective total CEM investment cost across EPR/WTIR slices. The
+(3) the effective total CEM investment cost across EPR/WTIR slices, and
+(4) a two-dimensional heatmap of cost-rate approximation errors. A CSV
+reports mean signed and mean absolute percentage errors per sample and
+across the design space, assuming uniform EPR/WTIR within each cell. The
 individual exported CEM coefficients remain constant within each sample.
 """
 
@@ -189,6 +193,16 @@ class SampledCostSet:
     # Not necessarily zero: unanchored local fits need not match the detailed
     # investment cost at their sample centre.
     centre_tcr_error_pct: float = 0.0
+
+
+@dataclass(frozen=True)
+class TcrErrorGrid:
+    """Counterfactual/predictive TCR errors over one sample's design cell."""
+
+    sample: SampledCostSet
+    epr_edges: np.ndarray
+    wtir_edges: np.ndarray
+    signed_error_pct: np.ndarray  # (WTIR, EPR); positive = overestimate
 
 
 CAPITAL_TYPES = (CostType.CAPEX, CostType.ABEX)
@@ -1010,12 +1024,282 @@ def _sample_plot_coordinates(
     raise ValueError(f"Unknown plot axis: {axis}")
 
 
+def _detailed_total_tcr_envelope(
+    samples: list[SampledCostSet],
+    spec: TechnologySpec,
+    plot_points: int,
+    cross_points: int,
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Project the detailed TCR over the sampled EPR x WTIR design window.
+
+    At each EPR, the grey band spans the minimum and maximum detailed cost
+    found over the permitted WTIR range; the WTIR panel does the converse.
+    Include the *actual sample centres* as well as evenly spaced bounds in
+    the marginalised dimension, so the displayed detailed slice curves are
+    necessarily inside the sampled envelope at the same x coordinates.
+
+    These are numerical envelopes, not claims of rigorous global extrema.
+    The storage working-gas capacity is fixed at its reference value.
+    """
+    if plot_points < 3 or cross_points < 2:
+        raise ValueError("plot_points must be >= 3 and envelope_points >= 2")
+
+    epr_low = min(s.epr_interval_days.lower for s in samples)
+    epr_high = max(s.epr_interval_days.upper for s in samples)
+    wtir_low = min(s.wtir_interval.lower for s in samples)
+    wtir_high = max(s.wtir_interval.upper for s in samples)
+
+    def sampled_values(low: float, high: float, centres: list[float]) -> list[float]:
+        return sorted({*map(float, np.linspace(low, high, cross_points)),
+                       *map(float, centres)})
+
+    wtir_values = sampled_values(wtir_low, wtir_high, [s.wtir for s in samples])
+    epr_values = sampled_values(epr_low, epr_high, [s.epr_days for s in samples])
+
+    # Two projected grids overlap at some points; reuse their detailed model
+    # evaluations instead of recomputing them.
+    cache: dict[tuple[float, float], float] = {}
+
+    def total_tcr(epr_days: float, wtir: float) -> float:
+        key = (float(epr_days), float(wtir))
+        if key not in cache:
+            capacities = design_capacities(spec, key[0], key[1])
+            detailed = evaluate_design(
+                spec, spec.default_storage_capacity_gwh_lhv, key[0], key[1],
+            )
+            total_cost = sum(
+                component.value_eur for component in detailed.components
+                if component.cost_type in CAPITAL_TYPES
+            )
+            value = total_cost / capacities[CostDriver.STORAGE]
+            if not isfinite(value):
+                raise ValueError(f"Non-finite detailed TCR at {key}")
+            cache[key] = value
+        return cache[key]
+
+    envelopes: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for axis, bounds, cross_values in (
+        ("epr", (epr_low, epr_high), wtir_values),
+        ("wtir", (wtir_low, wtir_high), epr_values),
+    ):
+        horizontal = np.linspace(*bounds, plot_points)
+        lower, upper = [], []
+        for x in horizontal:
+            tcr_values = (
+                [total_tcr(float(x), other) for other in cross_values]
+                if axis == "epr"
+                else [total_tcr(other, float(x)) for other in cross_values]
+            )
+            lower.append(min(tcr_values))
+            upper.append(max(tcr_values))
+        envelopes[axis] = (
+            horizontal, np.asarray(lower), np.asarray(upper),
+        )
+
+    return envelopes
+
+
+def calculate_tcr_error_grids(
+    samples: list[SampledCostSet],
+    points_per_axis: int = 20,
+) -> list[TcrErrorGrid]:
+    """Compare exported CEM TCR rates with detailed costs on each design cell.
+
+    Use equal-area midpoint quadrature in EPR (days) and WTIR, so each point
+    represents an equally likely design within its sample's rectangular cell.
+    For bundled designs and fixed-WTIR partial designs, off-centre points are
+    *counterfactual representativeness tests*, not feasible model decisions.
+    Fully decoupled designs can realise both varying ratios within the cell.
+
+    The reference storage energy capacity is held constant. This evaluates
+    CAPEX + ABEX only, not FOM, VOM, lifetime or system-level cost changes.
+    """
+    if not samples:
+        raise ValueError("Cannot evaluate TCR errors for an empty sample list.")
+    if points_per_axis < 2:
+        raise ValueError("points_per_axis must be >= 2.")
+    if len({(s.technology, s.method) for s in samples}) != 1:
+        raise ValueError("Evaluate one technology and method at a time.")
+
+    spec = get_technology(samples[0].technology)
+    grids = []
+    for sample in samples:
+        epr_edges = np.linspace(
+            sample.epr_interval_days.lower,
+            sample.epr_interval_days.upper,
+            points_per_axis + 1,
+        )
+        wtir_edges = np.linspace(
+            sample.wtir_interval.lower,
+            sample.wtir_interval.upper,
+            points_per_axis + 1,
+        )
+        errors = np.empty((points_per_axis, points_per_axis))
+        for j, wtir in enumerate((wtir_edges[1:] + wtir_edges[:-1]) / 2):
+            for i, epr_days in enumerate((epr_edges[1:] + epr_edges[:-1]) / 2):
+                capacities = design_capacities(spec, float(epr_days), float(wtir))
+                detailed = evaluate_design(
+                    spec, spec.default_storage_capacity_gwh_lhv,
+                    float(epr_days), float(wtir),
+                )
+                actual = sum(
+                    component.value_eur for component in detailed.components
+                    if component.cost_type in CAPITAL_TYPES
+                ) / capacities[CostDriver.STORAGE]
+                represented = (
+                    _sample_total_capital_cost(sample, capacities)
+                    / capacities[CostDriver.STORAGE]
+                )
+                if not isfinite(actual) or actual <= 0 or not isfinite(represented):
+                    raise ValueError(
+                        f"Invalid TCR at EPR={epr_days:.6g}, WTIR={wtir:.6g} "
+                        f"for {sample.sample_id}: detailed={actual}, represented={represented}"
+                    )
+                errors[j, i] = 100.0 * (represented - actual) / actual
+        grids.append(TcrErrorGrid(sample, epr_edges, wtir_edges, errors))
+
+    return grids
+
+
+def summarise_tcr_errors(grids: list[TcrErrorGrid]) -> list[dict[str, object]]:
+    """Return per-cell and design-space-area-weighted mean error statistics."""
+    if not grids:
+        raise ValueError("No TCR error grids to summarise.")
+
+    rows: list[dict[str, object]] = []
+    areas = []
+    for grid in grids:
+        sample = grid.sample
+        errors = grid.signed_error_pct
+        area = ((grid.epr_edges[-1] - grid.epr_edges[0])
+                * (grid.wtir_edges[-1] - grid.wtir_edges[0]))
+        areas.append(area)
+        rows.append({
+            "technology": sample.technology,
+            "method": sample.method.value,
+            "sample_id": sample.sample_id,
+            "interpretation": (
+                "fully_flexible_cost_approximation"
+                if sample.method in (
+                    CostMethod.FULLY_DECOUPLED,
+                    CostMethod.FULLY_DECOUPLED_CROSS_DRIVER,
+                ) else "counterfactual_fixed_ratio_representativeness"
+            ),
+            "epr_min_days": grid.epr_edges[0],
+            "epr_max_days": grid.epr_edges[-1],
+            "wtir_min": grid.wtir_edges[0],
+            "wtir_max": grid.wtir_edges[-1],
+            "grid_evaluations": errors.size,
+            "mean_signed_error_pct": float(np.mean(errors)),
+            "mean_absolute_error_pct": float(np.mean(np.abs(errors))),
+        })
+
+    total_area = sum(areas)
+    total_evaluations = sum(grid.signed_error_pct.size for grid in grids)
+    rows.append({
+        "technology": grids[0].sample.technology,
+        "method": grids[0].sample.method.value,
+        "sample_id": "ALL_CELLS",
+        "interpretation": rows[0]["interpretation"],
+        "epr_min_days": min(grid.epr_edges[0] for grid in grids),
+        "epr_max_days": max(grid.epr_edges[-1] for grid in grids),
+        "wtir_min": min(grid.wtir_edges[0] for grid in grids),
+        "wtir_max": max(grid.wtir_edges[-1] for grid in grids),
+        "grid_evaluations": total_evaluations,
+        "mean_signed_error_pct": sum(
+            area * float(np.mean(grid.signed_error_pct))
+            for area, grid in zip(areas, grids)
+        ) / total_area,
+        "mean_absolute_error_pct": sum(
+            area * float(np.mean(np.abs(grid.signed_error_pct)))
+            for area, grid in zip(areas, grids)
+        ) / total_area,
+    })
+    return rows
+
+
+def write_tcr_error_summary(
+    rows: list[dict[str, object]], output_path: str | Path,
+) -> Path:
+    """Save compact research diagnostics in a machine-readable CSV."""
+    if not rows:
+        raise ValueError("No TCR error statistics to write.")
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def write_tcr_error_heatmap(
+    grids: list[TcrErrorGrid], output_path: str | Path, *, png: bool = False,
+) -> tuple[Path, ...]:
+    """Plot signed percentage error in total TCR, with sample-cell boundaries."""
+    if not grids:
+        raise ValueError("No TCR error grids to plot.")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import TwoSlopeNorm
+    from matplotlib.patches import Rectangle
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    max_abs = max(float(np.max(np.abs(grid.signed_error_pct))) for grid in grids)
+    extent = max(max_abs, 0.01)
+    norm = TwoSlopeNorm(vmin=-extent, vcenter=0.0, vmax=extent)
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.3), constrained_layout=True)
+    for grid in grids:
+        ax.pcolormesh(
+            grid.epr_edges, grid.wtir_edges, grid.signed_error_pct,
+            cmap="RdBu_r", norm=norm, shading="flat", rasterized=True,
+        )
+        sample = grid.sample
+        ax.add_patch(Rectangle(
+            (grid.epr_edges[0], grid.wtir_edges[0]),
+            grid.epr_edges[-1] - grid.epr_edges[0],
+            grid.wtir_edges[-1] - grid.wtir_edges[0],
+            fill=False, edgecolor="0.2", linewidth=0.8, zorder=3,
+        ))
+        ax.plot(
+            sample.epr_days, sample.wtir, marker="o", markersize=4.5,
+            markerfacecolor="white", markeredgecolor="black", linestyle="none",
+            zorder=4,
+        )
+
+    scale = plt.cm.ScalarMappable(norm=norm, cmap="RdBu_r")
+    scale.set_array([])
+    fig.colorbar(scale, ax=ax, label="Represented minus detailed TCR (%)", pad=0.02)
+    ax.set_xlabel("EPR (days)")
+    ax.set_ylabel("WTIR (withdrawal / injection)")
+    ax.spines[["top", "right"]].set_visible(False)
+    summary = summarise_tcr_errors(grids)[-1]
+    ax.text(
+        0.02, 1.02,
+        f"Mean signed: {summary['mean_signed_error_pct']:+.2f}%    "
+        f"Mean absolute: {summary['mean_absolute_error_pct']:.2f}%",
+        transform=ax.transAxes, fontsize=10, ha="left", va="bottom",
+    )
+    fig.savefig(path, bbox_inches="tight")
+    saved = [path]
+    if png:
+        png_path = path.with_suffix(".png")
+        fig.savefig(png_path, dpi=300, bbox_inches="tight")
+        saved.append(png_path)
+    plt.close(fig)
+    return tuple(saved)
+
+
 def write_sample_plots(
     samples: list[SampledCostSet],
     output_dir: str | Path,
     plot_points: int = 25,
-) -> tuple[Path, Path, Path]:
-    """Write three PDFs showing design coverage and investment fidelity.
+    *,
+    png: bool = False,
+    envelope_points: int = 11,
+) -> tuple[Path, ...]:
+    """Write three PDFs (and optional PNGs) of cost-sample diagnostics.
 
     1. Coverage: points (bundled), horizontal segments (partially decoupled),
        or EPR x WTIR rectangles (both fully decoupled formulations).
@@ -1025,6 +1309,8 @@ def write_sample_plots(
        bundled or partially decoupled representations.
     3. Total: the detailed total TCR versus the exact *exported* CEM rate
        coefficients, both expressed in EUR/kWh of installed working gas.
+       Its light-grey band projects the complete EPR/WTIR design window
+       onto each axis using a sampled detailed-model cost envelope.
 
     All curves hold storage capacity at the technology's reference value.
     Reference curves are evaluated anew; the sampler's local training cases
@@ -1034,11 +1320,13 @@ def write_sample_plots(
         raise ValueError("Cannot plot an empty sample collection.")
     if len({(s.technology, s.method) for s in samples}) != 1:
         raise ValueError("Plot one technology and one sampling method at a time.")
+    if plot_points < 3 or envelope_points < 2:
+        raise ValueError("plot_points must be >= 3 and envelope_points >= 2")
 
     # Imported lazily so ordinary CSV/sample generation needs no plotting backend.
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Patch, Rectangle
 
     spec = get_technology(samples[0].technology)
     method = samples[0].method
@@ -1053,8 +1341,19 @@ def write_sample_plots(
         output_dir / f"{prefix}__total_tcr.pdf",
     )
 
-    colours = plt.get_cmap("tab20", max(len(samples), 1))
-    palette = {s.sample_id: colours(i) for i, s in enumerate(samples)}
+    plasma = plt.get_cmap("plasma")
+    positions = (
+        np.linspace(0.0, 0.90, len(samples))
+        if len(samples) > 1 else [0.45]
+    )
+    palette = {s.sample_id: plasma(position)
+               for s, position in zip(samples, positions)}
+
+    def save_figure(fig, pdf_path: Path) -> None:
+        fig.savefig(pdf_path, bbox_inches="tight")
+        if png:
+            fig.savefig(pdf_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
     # Figure 1: sample regions in EPR/WTIR design space.
     fig, ax = plt.subplots(figsize=(9, 5.6), constrained_layout=True)
@@ -1086,8 +1385,7 @@ def write_sample_plots(
            title=f"{spec.technology} | {method.value} | sample applicability")
     ax.grid(alpha=0.17)
     ax.set_axisbelow(True)
-    fig.savefig(output_paths[0], bbox_inches="tight")
-    plt.close(fig)
+    # save_figure(fig, output_paths[0])
 
     sweeps = _sampling_slices(samples, spec, plot_points)
     stage_order = (CostDriver.STORAGE, CostDriver.INJECTION, CostDriver.WITHDRAWAL)
@@ -1098,8 +1396,8 @@ def write_sample_plots(
     }
     legends = [
         Line2D([0], [0], color="0.55", linewidth=2, label="Detailed model (fixed other ratio)"),
-        Line2D([0], [0], color="tab:blue", linewidth=2.2, label="Sample prediction within interval"),
-        Line2D([0], [0], color="tab:blue", marker="o", linestyle="none",
+        Line2D([0], [0], color=plasma(0.45), linewidth=2.2, label="Sample prediction within interval"),
+        Line2D([0], [0], color=plasma(0.45), marker="o", linestyle="none",
                label="Sample centre"),
     ]
 
@@ -1159,11 +1457,13 @@ def write_sample_plots(
     )
     fig.legend(handles=legends, loc="outside lower center",
                ncol=3, frameon=False, fontsize=9)
-    fig.savefig(output_paths[1], bbox_inches="tight")
-    plt.close(fig)
+    # save_figure(fig, output_paths[1])
 
     # Figure 3: compare the entire CEM investment expression with the
     # detailed cost, including the allocation across all three capacities.
+    envelopes = _detailed_total_tcr_envelope(
+        samples, spec, plot_points, envelope_points,
+    )
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), constrained_layout=True)
     for col, axis in enumerate(("epr", "wtir")):
         ax = axes[col]
@@ -1171,6 +1471,11 @@ def write_sample_plots(
             "Vary EPR at each WTIR centre"
             if axis == "epr" else "Vary WTIR at each EPR centre",
             fontsize=10,
+        )
+        envelope_x, envelope_lower, envelope_upper = envelopes[axis]
+        ax.fill_between(
+            envelope_x, envelope_lower, envelope_upper,
+            facecolor="0.86", edgecolor="none", alpha=0.65, zorder=0,
         )
         for _, rows in sweeps[axis]:
             ax.plot(
@@ -1206,11 +1511,14 @@ def write_sample_plots(
         ax.grid(alpha=0.16)
     fig.suptitle(f"{spec.technology} | {method.value} | effective total TCR",
                  fontsize=13)
-    fig.legend(handles=legends, loc="outside lower center",
-               ncol=3, frameon=False, fontsize=9)
-    fig.savefig(output_paths[2], bbox_inches="tight")
-    plt.close(fig)
+    range_handle = Patch(facecolor="0.86", edgecolor="none", alpha=0.65,
+                         label="Detailed TCR range (other ratio varied)")
+    fig.legend(handles=[range_handle, *legends], loc="outside lower center",
+               ncol=4, frameon=False, fontsize=9)
+    save_figure(fig, output_paths[2])
 
+    if png:
+        return (*output_paths, *(path.with_suffix(".png") for path in output_paths))
     return output_paths
 
 
@@ -1316,16 +1624,33 @@ def main() -> None:
         help="Generate PDF design-space, source-TCR and total-TCR diagnostics.",
     )
     parser.add_argument(
+        "--png",
+        action="store_true",
+        help="Save 300-dpi PNG copies alongside PDFs; also enables plotting.",
+    )
+    parser.add_argument(
         "--plot-dir",
         type=Path,
         default=None,
-        help="PDF output directory; supplying this also enables plotting.",
+        help="Plot output directory; supplying this also enables plotting.",
     )
     parser.add_argument(
         "--plot-points",
         type=int,
         default=25,
         help="Detailed-model evaluations per EPR/WTIR reference slice (default: 25).",
+    )
+    parser.add_argument(
+        "--envelope-points",
+        type=int,
+        default=11,
+        help="Samples of the other ratio for the grey TCR envelope (default: 11).",
+    )
+    parser.add_argument(
+        "--error-grid-points",
+        type=int,
+        default=20,
+        help="Midpoint evaluations per axis and sample for TCR errors (default: 20).",
     )
 
     args = parser.parse_args()
@@ -1366,13 +1691,40 @@ def main() -> None:
         write_sample_summary(samples, args.csv)
         print(f"Saved {len(samples)} samples to {args.csv}")
 
-    if args.plots or args.plot_dir is not None:
+    if args.plots or args.png or args.plot_dir is not None:
         plot_dir = args.plot_dir or (
             Path("outputs") / "cost_rate_plots"
             / f"{config.technology}__{CostMethod(config.method).value}"
         )
-        paths = write_sample_plots(samples, plot_dir, args.plot_points)
+        paths = write_sample_plots(
+            samples, plot_dir, args.plot_points,
+            png=args.png, envelope_points=args.envelope_points,
+        )
         for path in paths:
+            print(f"Saved plot: {path}")
+
+        error_grids = calculate_tcr_error_grids(
+            samples, points_per_axis=args.error_grid_points,
+        )
+        error_rows = summarise_tcr_errors(error_grids)
+        error_prefix = (
+            f"{config.technology}__{CostMethod(config.method).value}"
+            f"__{len({s.epr_days for s in samples})}x{len({s.wtir for s in samples})}"
+        )
+        error_csv = write_tcr_error_summary(
+            error_rows,
+            plot_dir / f"{error_prefix}__tcr_errors.csv",
+        )
+        print(f"Saved error statistics: {error_csv}")
+        for row in error_rows:
+            print(
+                f"TCR errors [{row['sample_id']}]: "
+                f"signed={row['mean_signed_error_pct']:+.2f}%, "
+                f"absolute={row['mean_absolute_error_pct']:.2f}%, "
+                f"evaluations={row['grid_evaluations']}"
+            )
+        error_plot = plot_dir / f"{error_prefix}__tcr_error_heatmap.pdf"
+        for path in write_tcr_error_heatmap(error_grids, error_plot, png=args.png):
             print(f"Saved plot: {path}")
 
 
