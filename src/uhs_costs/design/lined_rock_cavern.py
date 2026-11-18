@@ -49,7 +49,7 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
 REFERENCE_SITE = "Skallen"
 REFERENCE_CAPACITY_GWH_LHV = 21.33
 REFERENCE_EPR_DAYS = 7.5
-REFERENCE_WTIR = 2.0
+REFERENCE_WTIR = 2.5
 
 # ----------------------------------------------------------------------------------------------------
 #

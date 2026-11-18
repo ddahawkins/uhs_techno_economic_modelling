@@ -324,7 +324,7 @@ class TechnologySpec:
 
     default_storage_capacity_gwh_lhv: float
     default_epr_days: float
-    default_wtir: float = 2.0
+    default_wtir: float = 2.5
 
 
 TECHNOLOGIES: tuple[TechnologySpec, ...] = (
@@ -1301,7 +1301,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 override_scope="cost_hystories",
                 parameter="material_cost_factor_injection",
                 low=1.0,
-                default=1.5,
+                default=1.0,
                 high=3.5,
                 unit="factor",
             ),
@@ -1327,7 +1327,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 override_scope="cost_hystories",
                 parameter="material_cost_factor_withdrawal",
                 low=1.0,
-                default=1.5,
+                default=1.0,
                 high=3.5,
                 unit="factor",
             ),

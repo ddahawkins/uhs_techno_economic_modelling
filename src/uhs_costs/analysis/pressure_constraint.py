@@ -927,7 +927,7 @@ def plot_soc_endpoint_bounds(
     lower_color = cmap(0.20)
     upper_color = cmap(0.80)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(5, 5))
 
     for label, df in labelled_results.items():
         x_vals = df[x].to_numpy()
@@ -1003,7 +1003,7 @@ def plot_soc_endpoint_bounds(
         color="0.65",
         linewidth=1.0,
         alpha=0.8,
-        label=r"$E_{s,t+\Delta t^{24}} = E_{s,t}$",
+        label=r"$E_{s,t+24h} = E_{s,t}$",
         zorder=0,
     )
 
@@ -1014,7 +1014,7 @@ def plot_soc_endpoint_bounds(
         xlabel or r"$E_{s,t} / \bar{E}_{s}\;[-]$"
     )
     ax.set_ylabel(
-        ylabel or r"$E_{s,t+\Delta t^{24}} / \bar{E}_{s}\;[-]$"
+        ylabel or r"$E_{s,t+24h} / \bar{E}_{s}\;[-]$"
     )
 
     if title is not None:

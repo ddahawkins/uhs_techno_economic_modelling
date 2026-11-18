@@ -14,8 +14,8 @@ class HyStoriesCostAssumptions:
     target_year: int = 2025
 
     # Material cost factors
-    material_cost_factor_injection: float = 1.5
-    material_cost_factor_withdrawal: float = 1.5
+    material_cost_factor_injection: float = 1
+    material_cost_factor_withdrawal: float = 1
 
     # Energy and commodity prices
     #

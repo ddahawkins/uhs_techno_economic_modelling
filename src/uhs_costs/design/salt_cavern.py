@@ -51,7 +51,7 @@ ASSUMPTIONS = construct_hystories_design_assumptions(
 REFERENCE_SITE = "Xanten"
 REFERENCE_CAPACITY_GWH_LHV = 397.36
 REFERENCE_EPR_DAYS = 12.0
-REFERENCE_WTIR = 2.0
+REFERENCE_WTIR = 2.5
 
 # ----------------------------------------------------------------------------------------------------
 #

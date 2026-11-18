@@ -50,7 +50,7 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
 REFERENCE_SITE = "Gournay Sur Aronde"
 REFERENCE_CAPACITY_GWH_LHV = 2571.34
 REFERENCE_EPR_DAYS = 66.0
-REFERENCE_WTIR = 2.0
+REFERENCE_WTIR = 2.5
 
 # ----------------------------------------------------------------------------------------------------
 #

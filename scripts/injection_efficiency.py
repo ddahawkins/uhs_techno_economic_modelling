@@ -1,9 +1,30 @@
 from pathlib import Path
 
-from uhs_costs.design.salt_cavern import construct_project as construct_salt_cavern_project
-from uhs_costs.design.lined_rock_cavern import construct_project as construct_lrc_project
-from uhs_costs.design.depleted_gas_field import construct_project as construct_dgf_project
-from uhs_costs.design.aquifer import construct_project as construct_aquifer_project
+from uhs_costs.design.salt_cavern import (
+        construct_project as construct_salt_cavern_project, 
+        REFERENCE_CAPACITY_GWH_LHV as sc_reference_capacity, 
+        REFERENCE_EPR_DAYS as sc_reference_epr, 
+        REFERENCE_WTIR as sc_reference_wtir
+    )
+from uhs_costs.design.lined_rock_cavern import (
+        construct_project as construct_lrc_project,
+        REFERENCE_CAPACITY_GWH_LHV as lrc_reference_capacity, 
+        REFERENCE_EPR_DAYS as lrc_reference_epr, 
+        REFERENCE_WTIR as lrc_reference_wtir
+    )
+    
+from uhs_costs.design.depleted_gas_field import (
+        construct_project as construct_dgf_project,
+        REFERENCE_CAPACITY_GWH_LHV as dgf_reference_capacity, 
+        REFERENCE_EPR_DAYS as dgf_reference_epr, 
+        REFERENCE_WTIR as dgf_reference_wtir
+    )
+from uhs_costs.design.aquifer import (
+        construct_project as construct_aquifer_project,
+        REFERENCE_CAPACITY_GWH_LHV as aquifer_reference_capacity, 
+        REFERENCE_EPR_DAYS as aquifer_reference_epr, 
+        REFERENCE_WTIR as aquifer_reference_wtir
+    )
 
 
 from uhs_costs.design.helpers.project import StorageProject
@@ -18,39 +39,33 @@ from uhs_costs.analysis.injection_efficiency import (
 
 def main() -> None:
     salt_cavern_project = construct_salt_cavern_project(
-        working_gas_capacity_kwh_lhv=800_000_000,
-        withdrawal_flow_kw_h2_lhv=800_000_000/(24*12),
-        injection_flow_kw_h2_lhv=800_000_000/(24*12)/2,
+        working_gas_capacity_kwh_lhv=sc_reference_capacity,
+        withdrawal_flow_kw_h2_lhv=sc_reference_capacity/(sc_reference_epr*24),
+        injection_flow_kw_h2_lhv=sc_reference_capacity/(sc_reference_epr*24*sc_reference_wtir),
         case_name="salt_cavern",
     )
 
     lrc_project = construct_lrc_project(
-        working_gas_capacity_kwh_lhv=20_000_000, 
-        withdrawal_flow_kw_h2_lhv=20_000_000/(24*7),
-        injection_flow_kw_h2_lhv=20_000_000/(24*7)/2,
+        working_gas_capacity_kwh_lhv=lrc_reference_capacity,
+        withdrawal_flow_kw_h2_lhv=lrc_reference_capacity/(lrc_reference_epr*24),
+        injection_flow_kw_h2_lhv=lrc_reference_capacity/(lrc_reference_epr*24*lrc_reference_wtir),
         case_name="lined_rock_cavern",
     )
 
     dgf_project = construct_dgf_project(
-        working_gas_capacity_kwh_lhv=2_000_000_000,
-        withdrawal_flow_kw_h2_lhv=2_000_000_000/(24*60),
-        injection_flow_kw_h2_lhv=2_000_000_000/(24*60)/2,
+        working_gas_capacity_kwh_lhv=dgf_reference_capacity,
+        withdrawal_flow_kw_h2_lhv=dgf_reference_capacity/(dgf_reference_epr*24),
+        injection_flow_kw_h2_lhv=dgf_reference_capacity/(dgf_reference_epr*24*dgf_reference_wtir),
         case_name="depleted_gas_field",
     )
 
     aquifer_project = construct_aquifer_project(
-        working_gas_capacity_kwh_lhv=1_800_000_000,
-        withdrawal_flow_kw_h2_lhv=1_800_000_000/(24*60),
-        injection_flow_kw_h2_lhv=1_800_000_000/(24*60)/2,
+        working_gas_capacity_kwh_lhv=aquifer_reference_capacity,
+        withdrawal_flow_kw_h2_lhv=aquifer_reference_capacity/(aquifer_reference_epr*24),
+        injection_flow_kw_h2_lhv=aquifer_reference_capacity/(aquifer_reference_epr*24*aquifer_reference_wtir),
         case_name="aquifer",
     )
 
-    # salt_cavern_project_1000 = construct_salt_cavern_project(
-    #     working_gas_capacity_kwh_lhv=1_000_000_000,
-    #     withdrawal_flow_kw_h2_lhv=3_000_000,
-    #     injection_flow_kw_h2_lhv=1_500_000,
-    #     case_name="salt_cavern_1TWh",
-    # )
 
     projects: dict[str, StorageProject] = {
         "salt_cavern": salt_cavern_project,
@@ -104,7 +119,7 @@ def main() -> None:
         title="Injection efficiency across state of charge",
         xlabel="State of charge [-]",
         ylabel="Injection efficiency [-]",
-        output_path=output_dir / "injection_efficiency_by_soc.png",
+        output_path=output_dir / "injection_efficiency_by_soc.pdf",
         show=True,
     )
 

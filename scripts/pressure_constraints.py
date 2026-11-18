@@ -1,4 +1,9 @@
-from uhs_costs.design.salt_cavern import construct_project as construct_salt_cavern_project
+from uhs_costs.design.salt_cavern import (
+        construct_project as construct_salt_cavern_project, 
+        REFERENCE_CAPACITY_GWH_LHV as sc_reference_capacity, 
+        REFERENCE_EPR_DAYS as sc_reference_epr, 
+        REFERENCE_WTIR as sc_reference_wtir
+    )
 from uhs_costs.analysis.pressure_constraint import (
     calculate_pressure_limited_flow_curves_for_projects,
     plot_curves,
@@ -26,9 +31,9 @@ from pathlib import Path
 def main() -> None:
 
     salt_cavern_project = construct_salt_cavern_project(
-        working_gas_capacity_kwh_lhv=800_000_000,
-        withdrawal_flow_kw_h2_lhv=800_000_000/(24*12),
-        injection_flow_kw_h2_lhv=800_000_000/(24*12)/2,
+        working_gas_capacity_kwh_lhv=sc_reference_capacity,
+        withdrawal_flow_kw_h2_lhv=sc_reference_capacity/(sc_reference_epr*24),
+        injection_flow_kw_h2_lhv=sc_reference_capacity/(sc_reference_epr*24*sc_reference_wtir),
         case_name="salt_cavern",
     )
 
@@ -210,7 +215,7 @@ def main() -> None:
         results={"default": results_by_project["Default:90-240bar"]},
         show_linear_fit=False,
         title=None,
-        output_path=output_dir / "pressure_constraint_future_soc_default.png",
+        output_path=output_dir / "pressure_constraint_future_soc_default.pdf",
         show=True,
     )
     plot_curves(
