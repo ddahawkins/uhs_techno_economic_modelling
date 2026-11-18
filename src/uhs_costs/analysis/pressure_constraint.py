@@ -927,7 +927,7 @@ def plot_soc_endpoint_bounds(
     lower_color = cmap(0.20)
     upper_color = cmap(0.80)
 
-    fig, ax = plt.subplots(figsize=(5, 5))
+    fig, ax = plt.subplots(figsize=(5, 4))
 
     for label, df in labelled_results.items():
         x_vals = df[x].to_numpy()
@@ -981,7 +981,7 @@ def plot_soc_endpoint_bounds(
             x_fit,
             lower_intercept + lower_slope * x_fit,
             linestyle="--",
-            color=lower_color,
+            color='black',
             alpha=0.8,
             label=r"Linearised lower bound",
         )
@@ -989,7 +989,7 @@ def plot_soc_endpoint_bounds(
             x_fit,
             upper_intercept + upper_slope * x_fit,
             linestyle="--",
-            color=upper_color,
+            color='black',
             alpha=0.8,
             label=r"Linearised upper bound",
         )

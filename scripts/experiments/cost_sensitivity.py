@@ -495,7 +495,7 @@ CATEGORY_ORDER = (
     "Geological / storage design",
     "Wellfield / cavern design",
     "Surface / process",
-    "Commodity / material economics",
+    "Commodity economics",
     "Project-cost uncertainty",
     "LRC cost basis",
 )
@@ -597,7 +597,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     # override (see apply_pressure_coordinates).
     SensitivitySpec(
         key="reservoir_pressure_level",
-        label="Reservoir pressure level (coupled)",
+        label="Reservoir pressure\n(coupled)",
         category="Geological / storage design",
         technologies=ALL_TECHS,
         overrides=(SensitivityOverride(
@@ -620,7 +620,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="reservoir_pressure_ratio",
-        label="Operating pressure-ratio headroom",
+        label="Operating pressure\n ratio headroom",
         category="Geological / storage design",
         technologies=ALL_TECHS,
         overrides=(SensitivityOverride(
@@ -637,7 +637,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="reservoir_abandonment_fraction",
-        label="DGF abandonment-pressure clearance",
+        label="DGF abandonment\npressure clearance",
         category="Geological / storage design",
         technologies=("depleted_gas_field",),
         overrides=(SensitivityOverride(
@@ -717,7 +717,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="salt_cavern_module_design",
-        label="Salt cavern module design",
+        label="Salt cavern\nmodule design",
         category="Wellfield / cavern design",
         technologies=("salt_cavern",),
         overrides=(
@@ -754,7 +754,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     
     SensitivitySpec(
         key="aquifer_min_saturation_design",
-        label="Aquifer minimum gas saturation",
+        label="Aquifer minimum\ngas saturation",
         category="Wellfield / cavern design",
         technologies=("aquifer",),
         overrides=(
@@ -798,7 +798,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="aquifer_max_saturation_design",
-        label="Aquifer maximum gas saturation",
+        label="Aquifer maximum\ngas saturation",
         category="Wellfield / cavern design",
         technologies=("aquifer",),
         overrides=(
@@ -850,7 +850,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="porous_wellfield_design",
-        label="Porous-media wellfield design",
+        label="Porous-media\nwellfield design",
         category="Wellfield / cavern design",
         technologies=POROUS_TECHS,
         overrides=(
@@ -885,7 +885,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="salt_fresh_water_pipeline",
-        label="Salt fresh-water pipeline length",
+        label="Salt fresh-water\npipeline length",
         category="Wellfield / cavern design",
         technologies=("salt_cavern",),
         overrides=(
@@ -909,7 +909,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="salt_brine_pipeline",
-        label="Salt brine-disposal pipeline length",
+        label="Salt brine-disposal\npipeline length",
         category="Wellfield / cavern design",
         technologies=("salt_cavern",),
         overrides=(
@@ -1004,7 +1004,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="lrc_cavern_radius",
-        label="LRC maximum cavern radius",
+        label="LRC maximum\ncavern radius",
         category="Wellfield / cavern design",
         technologies=("lined_rock_cavern",),
         overrides=(
@@ -1051,7 +1051,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="lrc_effective_volume_fraction",
-        label="LRC effective volume fraction",
+        label="LRC effective\nvolume fraction",
         category="Wellfield / cavern design",
         technologies=("lined_rock_cavern",),
         overrides=(
@@ -1127,7 +1127,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     # -------------------------------------------------------------------------
     SensitivitySpec(
         key="pipeline_pressure",
-        label="Pipeline / compressor inlet pressure",
+        label="Pipeline / compressor\ninlet pressure",
         category="Surface / process",
         technologies=ALL_TECHS,
         overrides=(
@@ -1154,7 +1154,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="gas_plant_distance",
-        label="Gas plant to nearest wellhead distance",
+        label="Gas plant to nearest\nwellhead distance",
         category="Surface / process",
         technologies=ALL_TECHS,
         overrides=(
@@ -1179,7 +1179,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="purification_requirement",
-        label="Purification requirement",
+        label="Purification\nrequirement",
         category="Surface / process",
         technologies=POROUS_TECHS,
         overrides=(
@@ -1197,7 +1197,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
                 parameter="purification_hydrogen_recovery",
                 technologies=("depleted_gas_field",),
                 low=0.95,
-                default=0.8996,
+                default=0.9,
                 high=0.85, 
                 unit="fraction",
             ),
@@ -1239,12 +1239,12 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
 
     # -------------------------------------------------------------------------
-    # Commodity / material economics
+    # Commodity economics
     # -------------------------------------------------------------------------
     SensitivitySpec(
         key="hydrogen_price",
-        label="Construction / cushion H2 price",
-        category="Commodity / material economics",
+        label="Construction / cushion\nHydrogen price",
+        category="Commodity economics",
         technologies=ALL_TECHS,
         overrides=(
             SensitivityOverride(
@@ -1270,7 +1270,7 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     SensitivitySpec(
         key="construction_electricity_price",
         label="Construction electricity price",
-        category="Commodity / material economics",
+        category="Commodity economics",
         technologies=ALL_TECHS,
         overrides=(
             SensitivityOverride(
@@ -1293,8 +1293,8 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="material_factor_injection",
-        label="Injection material cost factor",
-        category="Commodity / material economics",
+        label="Injection material\ncost factor",
+        category="Commodity economics",
         technologies=ALL_TECHS,
         overrides=(
             SensitivityOverride(
@@ -1319,8 +1319,8 @@ SENSITIVITY_SPECS: tuple[SensitivitySpec, ...] = (
     ),
     SensitivitySpec(
         key="material_factor_withdrawal",
-        label="Withdrawal material cost factor",
-        category="Commodity / material economics",
+        label="Withdrawal material\ncost factor",
+        category="Commodity economics",
         technologies=ALL_TECHS,
         overrides=(
             SensitivityOverride(
@@ -3233,7 +3233,7 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
     fig, axes = plt.subplots(
         1,
         3,
-        figsize=(8.27, 11.69),
+        figsize=(7.4,8.5),
         sharex=True,
         sharey=True,
         squeeze=False,
@@ -3380,7 +3380,7 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
             marker=LOW_MARKER,
             linestyle="None",
             markersize=6,
-            label="Low parameter setting",
+            label="Low parameter",
         ),
         Line2D(
             [0],
@@ -3389,7 +3389,7 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
             marker=HIGH_MARKER,
             linestyle="None",
             markersize=6,
-            label="High parameter setting",
+            label="High parameter",
         ),
     ]
 
@@ -3402,12 +3402,12 @@ def plot_tcr_sensitivity_ranges(rows: list[dict[str, Any]]) -> None:
         fontsize=7.5,
     )
 
-    fig.suptitle("Sensitivity of CEM-ready UHS capital-cost rates", y=0.995)
+    # fig.suptitle("Sensitivity of CEM-ready UHS capital-cost rates", y=0.995)
     fig.subplots_adjust(
-        left=0.31,
+        left=0.23,
         right=0.99,
-        top=0.94,
-        bottom=0.085,
+        top=0.97,
+        bottom=0.1,
         wspace=0.08,
     )
     fig.savefig(FIGURE_DIR / "tcr_sensitivity_ranges.pdf")

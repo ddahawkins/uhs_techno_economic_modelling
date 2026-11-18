@@ -490,7 +490,7 @@ def plot_injection_efficiency_curve(
     if not labelled_results:
         raise ValueError("No results provided for plotting.")
 
-    fig, ax = plt.subplots(figsize=(5, 5))
+    fig, ax = plt.subplots(figsize=(5, 4))
 
     n_cases = len(labelled_results)
     cmap = plt.get_cmap("plasma")
