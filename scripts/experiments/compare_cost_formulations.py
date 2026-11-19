@@ -2,8 +2,10 @@
 
 For every requested UHS technology, produce two publication-style PDFs:
 
-* ``<technology>_tcr_slices.pdf``: detailed TCR and CEM approximations along
-  EPR and WTIR, holding the other ratio at its reference value.
+* ``<technology>_tcr_slices.pdf``: relative change in detailed TCR and CEM
+  approximations along EPR and WTIR, holding the other ratio at its reference
+  value. Light-grey envelopes show detailed TCR variation across the other
+  ratio's evaluation range.
 * ``<technology>_tcr_error_maps.pdf``: F and FX percentage errors over the
   full EPR-factor x WTIR evaluation domain, with FX training points marked.
 
@@ -30,6 +32,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 
 from uhs_costs.cost_model.helpers.cost_components import CostDriver, CostType
@@ -63,14 +67,16 @@ FORMULATIONS = {
 
 # 190 mm wide: Elsevier two-column format. Font sizes remain legible at 100%.
 WIDTH_INCH = 190 / 25.4
-PURPLE = "#7e03a8"
-PLASMA = (
-    "#4c02a1",
-    "#aa2395",
-    "#e66c5c",
-    "#fdc527",
-
-)
+REFERENCE_WTIR = 2.0
+PLASMA = plt.get_cmap("plasma")
+FORMULATION_COLOURS = {
+    "B": PLASMA(0.10),
+    "P": PLASMA(0.34),
+    "F": PLASMA(0.60),
+    "FX": PLASMA(0.84),
+}
+DETAILED_COLOUR = "0.40"
+ENVELOPE_COLOUR = "0.86"
 
 
 def _cost_predictions(technology: str):
@@ -85,7 +91,7 @@ def _cost_predictions(technology: str):
             epr_factor_range=STUDY_EPR_FACTOR_RANGE,
             wtir_range=STUDY_WTIR_RANGE,
             epr_factor_override=1.0,
-            wtir_override=2,
+            wtir_override=REFERENCE_WTIR,
             fx_training_epr_factors=(
                 STUDY_EPR_FACTOR_TRAINING if label == "FX" else None
             ),
@@ -137,13 +143,17 @@ def _analysis(technology: str, samples, slice_points: int, grid_points: int):
         return cache[key]
 
     epr_slice = np.unique(np.r_[np.linspace(*STUDY_EPR_FACTOR_RANGE, slice_points), 1.0])
-    wtir_slice = np.unique(np.r_[np.linspace(*STUDY_WTIR_RANGE, slice_points), 2])
+    wtir_slice = np.unique(np.r_[
+        np.linspace(*STUDY_WTIR_RANGE, slice_points), REFERENCE_WTIR
+    ])
 
-    epr_traces = [evaluate(factor, 2) for factor in epr_slice]
+    epr_traces = [evaluate(factor, REFERENCE_WTIR) for factor in epr_slice]
     wtir_traces = [evaluate(1.0, value) for value in wtir_slice]
 
     epr_grid = np.unique(np.r_[np.linspace(*STUDY_EPR_FACTOR_RANGE, grid_points), 1.0])
-    wtir_grid = np.unique(np.r_[np.linspace(*STUDY_WTIR_RANGE, grid_points), 2])
+    wtir_grid = np.unique(np.r_[
+        np.linspace(*STUDY_WTIR_RANGE, grid_points), REFERENCE_WTIR
+    ])
     detailed = np.empty((len(wtir_grid), len(epr_grid)))
     fitted = {label: np.empty_like(detailed) for label in ("F", "FX")}
 
@@ -162,51 +172,130 @@ def _analysis(technology: str, samples, slice_points: int, grid_points: int):
     if any(not np.isfinite(error).all() for error in errors.values()):
         raise ValueError(f"Invalid detailed TCR or percentage error for {technology}.")
 
-    return epr_slice, epr_traces, wtir_slice, wtir_traces, epr_grid, wtir_grid, errors
+    # Use the already evaluated two-dimensional detailed-cost grid to show how
+    # the *other* design ratio changes the detailed TCR at each abscissa.
+    # These are design-space envelopes, not fit-error or confidence intervals.
+    epr_min = np.interp(epr_slice, epr_grid, detailed.min(axis=0))
+    epr_max = np.interp(epr_slice, epr_grid, detailed.max(axis=0))
+    wtir_min = np.interp(wtir_slice, wtir_grid, detailed.min(axis=1))
+    wtir_max = np.interp(wtir_slice, wtir_grid, detailed.max(axis=1))
+    epr_centre = np.array([point[0] for point in epr_traces])
+    wtir_centre = np.array([point[0] for point in wtir_traces])
+    envelopes = {
+        "epr": (np.minimum(epr_min, epr_centre),
+                np.maximum(epr_max, epr_centre)),
+        "wtir": (np.minimum(wtir_min, wtir_centre),
+                 np.maximum(wtir_max, wtir_centre)),
+    }
+
+    return (epr_slice, epr_traces, wtir_slice, wtir_traces,
+            epr_grid, wtir_grid, errors, envelopes)
 
 
 def _plot_slices(technology, samples, analysis, output_dir: Path):
-    epr, epr_traces, wtir, wtir_traces, *_ = analysis
-    fig, axes = plt.subplots(1, 2, figsize=(WIDTH_INCH, 3.3), constrained_layout=True)
+    epr, epr_traces, wtir, wtir_traces, *_, envelopes = analysis
+    fig, axes = plt.subplots(
+        1, 2, figsize=(WIDTH_INCH, 3.3), sharey=True,
+        constrained_layout=True,
+    )
+
+    reference_index = int(np.argmin(np.abs(epr - 1.0)))
+    reference_tcr = epr_traces[reference_index][0]
+    if not np.isclose(epr[reference_index], 1.0) or reference_tcr <= 0:
+        raise ValueError("The detailed reference TCR must be positive and sampled.")
+
+    def relative_change(tcr):
+        """Percentage change against the *same detailed* reference for all curves."""
+        return 100.0 * (np.asarray(tcr) / reference_tcr - 1.0)
+
+    spec = get_technology(technology)
+    b_reference_tcr = _sample_tcr(
+        samples["B"],
+        design_capacities(spec, samples["B"].epr_days, REFERENCE_WTIR),
+    ) / (spec.default_storage_capacity_gwh_lhv * 1e6)
 
     for ax, x, traces, variable in (
         (axes[0], epr, epr_traces, "epr"),
         (axes[1], wtir, wtir_traces, "wtir"),
     ):
-        ax.plot(x, [point[0] for point in traces], color="black", lw=1.9,ls="-",
-                label="Detailed")
+        lower, upper = envelopes[variable]
+        ax.fill_between(
+            x, relative_change(lower), relative_change(upper),
+            color=ENVELOPE_COLOUR, linewidth=0, zorder=1,
+        )
+        ax.plot(
+            x, relative_change([point[0] for point in traces]),
+            # A slightly wider grey foundation remains legible where the
+            # approximations nearly coincide with the detailed model.
+            color=DETAILED_COLOUR, lw=2.4, zorder=3,
+        )
 
+        reference_x = 1.0 if variable == "epr" else REFERENCE_WTIR
+        ax.axhline(0, color="0.78", lw=0.75, zorder=0)
+        ax.axvline(reference_x, color="0.68", ls=":", lw=0.8, zorder=0)
 
-        reference_x = 1.0 if variable == "epr" else 2
-        reference_tcr = _sample_tcr(
-            samples["B"],
-            design_capacities(
-                get_technology(technology), samples["B"].epr_days, 2
-            ),
-        ) / (get_technology(technology).default_storage_capacity_gwh_lhv * 1e6)
-
-        ax.plot([reference_x], [reference_tcr], marker="x", ms=6,
-                mew=1.4, color=PLASMA[0], ls="none", label="B reference", zorder=10)
-        # P can vary EPR at fixed WTIR, but WTIR is fixed by construction.
+        # P may vary EPR at fixed WTIR. At fixed EPR it is a point,
+        # coincident with B. A small filled P dot inside the open B ring
+        # makes both configurations visible without shifting either point.
         if variable == "epr":
-            ax.plot(x, [point[1]["P"] for point in traces], color=PLASMA[1],
-                    ls="--", lw=1.2, label="P")
-        ax.plot(x, [point[1]["F"] for point in traces], color=PLASMA[2],
-                        lw=1.5, ls="--", label="F")
-        ax.plot(x, [point[1]["FX"] for point in traces], color=PLASMA[3],ls="--",
-                        lw=1.6, label="FX")
-        
-        ax.axvline(reference_x, color="0.6", ls="--", lw=0.7, zorder=0)
+            # P and F can coincide on this slice. The thicker P line shows
+            # around the thinner F line when their predictions overlap.
+            ax.plot(
+                x, relative_change([point[1]["P"] for point in traces]),
+                color=FORMULATION_COLOURS["P"],ls="--", lw=1, zorder=4,
+            )
+        ax.plot(
+            x, relative_change([point[1]["F"] for point in traces]),
+            color=FORMULATION_COLOURS["F"],ls="--", lw=1, zorder=5,
+        )
+        ax.plot(
+            x, relative_change([point[1]["FX"] for point in traces]),
+            color=FORMULATION_COLOURS["FX"],ls="--", lw=1, zorder=6,
+        )
+
+        ax.plot(
+            [reference_x], relative_change([b_reference_tcr]),
+            marker="o", ms=8.0, mfc="white", mec=FORMULATION_COLOURS["B"],
+            mew=1.7, ls="none", zorder=8,
+        )
+        if variable == "wtir":
+            centre_index = int(np.argmin(np.abs(wtir - REFERENCE_WTIR)))
+            ax.plot(
+                [reference_x],
+                relative_change([wtir_traces[centre_index][1]["P"]]),
+                marker="o", ms=4.2, color=FORMULATION_COLOURS["P"],
+                ls="none", zorder=9,
+            )
+
         ax.set_xlabel("EPR / reference EPR [-]" if variable == "epr"
                       else "WTIR (withdrawal / injection) [-]")
-        # ax.grid(axis="y", color="0.9", lw=0.6)
         ax.spines[["top", "right"]].set_visible(False)
 
-    axes[0].set_ylabel("Total capital requirement [€/kWh$_{\\mathrm{H_2}}$]")
+    axes[0].set_ylabel("Change in TCR relative to reference [%]")
     axes[0].set_xlim(*STUDY_EPR_FACTOR_RANGE)
     axes[1].set_xlim(*STUDY_WTIR_RANGE)
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="outside lower center", ncol=5,
+    epr_ticks = np.arange(0.5, 1.501, 0.25)
+    axes[0].set_xticks([
+        tick for tick in epr_ticks
+        if STUDY_EPR_FACTOR_RANGE[0] <= tick <= STUDY_EPR_FACTOR_RANGE[1]
+    ])
+    wtir_ticks = np.arange(1, 6)
+    axes[1].set_xticks([
+        tick for tick in wtir_ticks
+        if STUDY_WTIR_RANGE[0] <= tick <= STUDY_WTIR_RANGE[1]
+    ])
+
+    handles = [
+        Line2D([], [], color=DETAILED_COLOUR, lw=2.4, label="Detailed"),
+        Patch(facecolor=ENVELOPE_COLOUR, label="Detailed range"),
+        Line2D([], [], color=FORMULATION_COLOURS["B"], marker="o",
+               markerfacecolor="white", markeredgewidth=1,
+               ls="none", ms=6.5, label="B"),
+        Line2D([], [], color=FORMULATION_COLOURS["P"], lw=1, label="P"),
+        Line2D([], [], color=FORMULATION_COLOURS["F"], lw=1, label="F"),
+        Line2D([], [], color=FORMULATION_COLOURS["FX"], lw=1, label="FX"),
+    ]
+    fig.legend(handles=handles, loc="outside lower center", ncol=6,
                fontsize=8, frameon=False)
 
     path = output_dir / f"{technology}_tcr_slices.pdf"
@@ -216,8 +305,8 @@ def _plot_slices(technology, samples, analysis, output_dir: Path):
 
 
 def _plot_error_maps(technology: str, analysis, output_dir: Path):
-    *_, epr, wtir, errors = analysis
-    fig, axes = plt.subplots(1, 2, figsize=(WIDTH_INCH, 3.4),
+    epr, wtir, errors = analysis[4:7]
+    fig, axes = plt.subplots(1, 2, figsize=(WIDTH_INCH, 2.4),
                              sharex=True, sharey=True, constrained_layout=True)
     magnitude = max(float(np.max(np.abs(error))) for error in errors.values())
     scale = max(magnitude, 0.01)
@@ -226,7 +315,8 @@ def _plot_error_maps(technology: str, analysis, output_dir: Path):
     for ax, label in zip(axes, ("F", "FX")):
         image = ax.pcolormesh(epr, wtir, errors[label], shading="nearest",
                               cmap="RdBu_r", norm=norm, rasterized=True)
-        ax.plot(1.0, 2, marker="x", ms=6, mew=1.3, color="black")
+        ax.plot(1.0, REFERENCE_WTIR, marker="o", ms=5,
+                mfc="white", mec="black", mew=1.2)
         if label == "FX":
             xx, yy = np.meshgrid(STUDY_EPR_FACTOR_TRAINING, STUDY_WTIR_TRAINING)
             ax.scatter(xx, yy, marker=".", color="black", s=5, alpha=0.5)
@@ -262,7 +352,7 @@ def main() -> None:
         print(f"Calibrating B/P/F/FX for {technology} ...", flush=True)
         samples = _cost_predictions(technology)
         analysis = _analysis(technology, samples, args.slice_points, args.grid_points)
-        *_, errors = analysis
+        errors = analysis[6]
         _plot_slices(technology, samples, analysis, args.output_dir)
         _plot_error_maps(technology, analysis, args.output_dir)
         for label in ("F", "FX"):
