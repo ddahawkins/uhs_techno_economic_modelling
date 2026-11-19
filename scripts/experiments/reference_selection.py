@@ -42,8 +42,8 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
 
 # Only EPR (days) and WTIR (withdrawal/injection ratio) are fixed. Each site's
 # capacity E comes from its "H2 reference working GWh" CSV field.
-REFERENCE_RATIOS = {"DGF": (66., 2.), "SA": (66., 2.),
-                    "SC": (12., 2.), "LRC": (7.5, 2.)}
+REFERENCE_RATIOS = {"DGF": (66., 3), "SA": (66., 3),
+                    "SC": (12., 3), "LRC": (7.5, 3)}
 CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
 DESIGN_RANGES = {
     "DGF": ((33., 66., 100.), (1., 2., 3.)),
@@ -66,7 +66,7 @@ GENERAL_ALL = {"pipeline_pressure_pa": 55e5,
                "drilling_complexity_index": 1.}
 GENERAL_BY_CLASS = {
     "DGF": {"recovery_factor": .80, "purification_factor": 1.5,
-            "purification_hydrogen_recovery": .8996},
+            "purification_hydrogen_recovery": .9},
     "SA": {"recovery_factor": .90, "purification_factor": .33,
            "purification_hydrogen_recovery": .95,
            "minimum_gas_saturation": .60, "maximum_gas_saturation": .80},
@@ -93,24 +93,14 @@ TECHNOLOGY_BY_CLASS = {
 HYSTORIES_COST_OVERRIDES = {
     "hydrogen_cost_eur_per_kg": 6.71,
     "cost_of_electricity_eur_per_mwh": 80.,
-    "material_cost_factor_injection": 1.5,
-    "material_cost_factor_withdrawal": 1.5,
+    "material_cost_factor_injection": 1,
+    "material_cost_factor_withdrawal": 1,
     "surface_contingency_fraction": .20,
     "subsurface_contingency_fraction": .20,
     "surface_abex_fraction": .20,
     "subsurface_abex_fraction": .20,
     "bop_fraction": .05,
 }
-LRC_COST_OVERRIDES = {
-    "lrc_well_fixed_cost_eur_per_well": 2_579_552.1611,
-    "lrc_well_variable_cost_eur_per_m": 1_521.4581,
-    "lrc_mining_cost_eur_per_m3": 100.3159,
-    "lrc_steel_lining_cost_eur_per_tonne": 1_086.7558,
-    "lrc_concrete_lining_cost_eur_per_tonne": 60.1896,
-    "lrc_lining_installation_fraction": .05,
-}
-
-
 @dataclass(frozen=True)
 class Site:
     row_index: int
@@ -398,11 +388,8 @@ def model_costs(site: Site, models: dict, facility: tuple[float, float, float]) 
         injection_flow_kw_h2_lhv=injection_kw,
         assumptions=updated_assumptions, case_name=TECHS[site.cls],
     )
-    if site.cls == "LRC":
-        result = cost_function(project, overrides=HYSTORIES_COST_OVERRIDES,
-                               lrc_overrides=LRC_COST_OVERRIDES)
-    else:
-        result = cost_function(project, overrides=HYSTORIES_COST_OVERRIDES)
+    # LRC-specific costs use their centrally maintained EUR2025 defaults.
+    result = cost_function(project, overrides=HYSTORIES_COST_OVERRIDES)
     return component_rates(result)
 
 
@@ -436,41 +423,88 @@ def weighted_median(values: list[float], weights: list[float]) -> float:
     return points[-1][1]
 
 
-def medoid_ranking(vectors: list[tuple[float, ...]], weights: list[float]
-                   ) -> list[tuple[float, int]]:
-    """All-pairs Euclidean medoid in robustly normalised log-coordinate space.
+def weighted_quantile(values: list[float], weights: list[float], q: float) -> float:
+    """Linear weighted quantile, retaining the original result for equal weights.
 
-    Coordinate log scaling handles physical units and proportional differences.
-    Sample IQR normalisation avoids depth or one cost channel dominating merely
-    by numerical range. A zero-IQR axis falls back to its finite log range.
+    Interpolate between weighted observation midpoints, rescaled onto [0, 1].
+    With equal weights this reproduces the prior (n-1)*q quantile definition.
+    """
+    if len(values) != len(weights) or not values or not 0 <= q <= 1:
+        raise ValueError("Invalid weighted quantile inputs")
+    if any(w <= 0 or not math.isfinite(w) for w in weights):
+        raise ValueError("Weighted quantile requires positive finite weights")
+    # Repeated identical records share the same total weight; splitting a
+    # facility into duplicate rows must not change the scale of an axis.
+    pairs = []
+    for value, weight in sorted(zip(values, weights)):
+        if pairs and pairs[-1][0] == value:
+            pairs[-1] = (value, pairs[-1][1] + weight)
+        else:
+            pairs.append((value, weight))
+    if len(pairs) == 1:
+        return pairs[0][0]
+    midpoints = []
+    cumulative = 0.
+    for _, weight in pairs:
+        midpoints.append(cumulative + .5 * weight)
+        cumulative += weight
+    spread = midpoints[-1] - midpoints[0]
+    if spread <= 0:
+        raise ValueError("Invalid weighted quantile midpoint spread")
+    target = midpoints[0] + q * spread
+    for i in range(len(pairs) - 1):
+        if midpoints[i] <= target <= midpoints[i + 1]:
+            fraction = (target - midpoints[i]) / (midpoints[i + 1] - midpoints[i])
+            return pairs[i][0] * (1 - fraction) + pairs[i + 1][0] * fraction
+    return pairs[-1][0]
+
+
+def medoid_statistics(vectors: list[tuple[float, ...]], weights: list[float]
+                      ) -> tuple[list[tuple[float, int]], list[tuple[float, ...]], tuple[float, ...]]:
+    """Rank observed medoids and decompose each score across its coordinates.
+
+    Distances are Euclidean in IQR-normalised log coordinates. Normalisation
+    uses the same facility weights as the objective, including duplicated sites.
+    Each axis contributes (normalised difference)^2 / pairwise distance, so the
+    three economic contributions sum to the original total medoid score.
     """
     if not vectors or any(len(v) != len(vectors[0]) for v in vectors):
         raise ValueError("Inconsistent/empty medoid vectors")
-    if len(vectors) != len(weights) or any(w <= 0 for w in weights):
+    if len(vectors) != len(weights) or any(w <= 0 or not math.isfinite(w) for w in weights):
         raise ValueError("Invalid medoid weights")
     if any(x <= 0 or not math.isfinite(x) for v in vectors for x in v):
         raise ValueError("All medoid features must be finite and strictly positive")
     log_v = [[math.log(x) for x in vector] for vector in vectors]
     axes = list(zip(*log_v))
-    def quantile(v: tuple[float, ...], q: float) -> float:
-        s = sorted(v)
-        t = (len(s) - 1) * q
-        i = math.floor(t)
-        return s[i] if i == len(s) - 1 else s[i] * (1 - (t-i)) + s[i+1] * (t-i)
     scales = []
     for axis in axes:
-        iqr = quantile(axis, .75) - quantile(axis, .25)
+        iqr = (weighted_quantile(list(axis), weights, .75)
+               - weighted_quantile(list(axis), weights, .25))
         scale = iqr or (max(axis) - min(axis)) or 1.
         scales.append(scale)
+    total_weight = sum(weights)
     scores = []
+    contributions = []
     for i, row in enumerate(log_v):
         score = 0.
+        parts = [0.] * len(row)
         for j, other in enumerate(log_v):
-            distance = math.sqrt(sum(((a-b)/s)**2
-                                     for a, b, s in zip(row, other, scales)))
+            squared = [((a-b)/s)**2 for a, b, s in zip(row, other, scales)]
+            distance = math.sqrt(sum(squared))
             score += weights[j] * distance
-        scores.append((score / sum(weights), i))
-    return sorted(scores, key=lambda item: (item[0], item[1]))
+            if distance:
+                for k, component in enumerate(squared):
+                    parts[k] += weights[j] * component / distance
+        scores.append((score / total_weight, i))
+        contributions.append(tuple(component / total_weight for component in parts))
+    return (sorted(scores, key=lambda item: (item[0], item[1])),
+            contributions, tuple(scales))
+
+
+def medoid_ranking(vectors: list[tuple[float, ...]], weights: list[float]
+                   ) -> list[tuple[float, int]]:
+    """Return observed-site medoids ranked by their weighted mean distance."""
+    return medoid_statistics(vectors, weights)[0]
 
 
 def group_key(site: Site) -> tuple[str, str, str]:
@@ -587,11 +621,14 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
         return summary, [], [], successful, None
     weights = site_weights(successful)
     geo = medoid_ranking([s.vector() for s in successful], weights)
-    econ = medoid_ranking([tuple(r[c] for c in COSTS) for r in rates], weights)
+    econ, econ_contributions, _ = medoid_statistics(
+        [tuple(r[c] for c in COSTS) for r in rates], weights)
     geo_i, econ_i = geo[0][1], econ[0][1]
     gscore = dict((i, score) for score, i in geo)
     escore = dict((i, score) for score, i in econ)
     medians = {c: weighted_median([r[c] for r in rates], weights) for c in COSTS}
+    econ_ranks = {i: rank for rank, (_, i) in enumerate(econ, start=1)}
+    best_econ_score = econ[0][0]
     synthetic_site, mean_counts = average_design(
         cls, sites, min_lrc_volume, min_pressure_source
     )
@@ -610,16 +647,28 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
                     for field, count in mean_counts.items()}}
     rows = []
     for i, (site, result) in enumerate(zip(successful, rates)):
+        axis_contributions = econ_contributions[i]
+        if not math.isclose(sum(axis_contributions), escore[i], rel_tol=1e-11,
+                            abs_tol=1e-11):
+            raise AssertionError(f"Economic medoid score decomposition failed: {site.name}")
         rows.append({**site_fields(site), **result,
                      "group_weight": weights[i],
                      "design_medoid_score": gscore[i],
                      "economic_medoid_score": escore[i],
                      "is_design_medoid": i == geo_i,
-                     "is_economic_medoid": i == econ_i})
+                     "is_economic_medoid": i == econ_i,
+                     "economic_medoid_rank": econ_ranks[i],
+                     "economic_medoid_gap_pct": 100 * (escore[i] / best_econ_score - 1),
+                     **{f"economic_score_contribution_{name}": axis_contributions[k]
+                        for k, name in enumerate(("injection", "storage", "withdrawal"))},
+                     **{f"{name}_vs_class_median_pct": 100 * (result[c] / medians[c] - 1)
+                        for name, c in zip(("injection", "storage", "withdrawal"), COSTS)}})
     summary.update({"design_medoid_site": successful[geo_i].name,
                     "design_medoid_row": successful[geo_i].row_index,
                     "economic_medoid_site": successful[econ_i].name,
                     "economic_medoid_row": successful[econ_i].row_index,
+                    "economic_runner_up_site": successful[econ[1][1]].name,
+                    "economic_runner_up_gap_pct": 100 * (econ[1][0] / best_econ_score - 1),
                     "same_medoid": geo_i == econ_i,
                     "issue": ""})
     comparisons = []
@@ -861,7 +910,8 @@ def main() -> None:
                     "capacity_basis", "min_E_gwh", "max_E_gwh",
                     "EPR_days", "WTIR", "design_medoid_site",
                     "design_medoid_row", "economic_medoid_site",
-                    "economic_medoid_row", "same_medoid"]
+                    "economic_medoid_row", "economic_runner_up_site",
+                    "economic_runner_up_gap_pct", "same_medoid"]
     write_csv(args.output_dir / "selection_summary.csv", summaries, summary_cols)
     if ranked:
         write_csv(args.output_dir / "candidate_cost_rates.csv", ranked,
