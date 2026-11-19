@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from math import log
 
-from uhs_costs.constants import HYDROGEN_LHV_KWH_PER_KG
+from uhs_costs.constants import HYDROGEN_LHV_KWH_PER_KG, HYSTORIES_COST_INFLATION
 
 
 HYSTORIES_VARIABLE_OPEX_COEFFICIENT = 0.746
@@ -54,7 +54,7 @@ def fixed_opex_base_cost_eur_per_year(fixed_cost_k_eur: float = 2100) -> float:
     Component:
         2100 kEUR/year
     """
-    return fixed_cost_k_eur * 1000
+    return fixed_cost_k_eur * 1000 * HYSTORIES_COST_INFLATION
 
 
 def fixed_opex_fraction_of_epc_cost_eur_per_year(
@@ -102,7 +102,7 @@ def variable_opex_rate_injection_compression_total_eur_per_kwh_h2_lhv(
         * cost_of_electricity_eur_per_mwh
         * log(compression_ratio)
     )
-    return _eur_per_tonne_h2_to_eur_per_kwh_h2_lhv(rate_eur_per_tonne_h2)
+    return _eur_per_tonne_h2_to_eur_per_kwh_h2_lhv(rate_eur_per_tonne_h2) #no escalation, electricity prices already updated
 
 
 def variable_opex_rate_injection_compression_electricity_eur_per_kwh_h2_lhv(
@@ -129,7 +129,7 @@ def variable_opex_rate_injection_compression_electricity_eur_per_kwh_h2_lhv(
         cost_of_electricity_eur_per_mwh=cost_of_electricity_eur_per_mwh,
         compression_ratio=compression_ratio,
     )
-    return total / (1 + ancillary_cost_fraction_of_electricity)
+    return total / (1 + ancillary_cost_fraction_of_electricity) #no escalation, electricity prices already updated
 
 
 def variable_opex_rate_injection_compression_ancillary_eur_per_kwh_h2_lhv(
@@ -154,7 +154,7 @@ def variable_opex_rate_injection_compression_ancillary_eur_per_kwh_h2_lhv(
             ),
         )
     )
-    return ancillary_cost_fraction_of_electricity * electricity
+    return ancillary_cost_fraction_of_electricity * electricity #no escalation, electricity prices already updated
 
 
 def variable_opex_rate_injection_eur_per_kwh_h2_lhv(
@@ -189,8 +189,8 @@ def variable_opex_rate_injection_eur_per_kwh_h2_lhv(
         compression_ratio=compression_ratio,
         ancillary_cost_fraction_of_electricity=(
             ancillary_cost_fraction_of_electricity
-        ),
-    )
+        ), 
+    ) #no escalation, electricity prices already updated
 
 
 def variable_opex_rate_withdrawal_eur_per_kwh_h2_lhv(
@@ -217,4 +217,4 @@ def variable_opex_rate_withdrawal_eur_per_kwh_h2_lhv(
         * cost_of_electricity_eur_per_mwh
         * (HYSTORIES_WITHDRAWAL_BASE_TERM + purification_coefficient)
     )
-    return _eur_per_tonne_h2_to_eur_per_kwh_h2_lhv(rate_eur_per_tonne_h2)
+    return _eur_per_tonne_h2_to_eur_per_kwh_h2_lhv(rate_eur_per_tonne_h2) #no escalation, electricity prices already updated

@@ -7,7 +7,6 @@ Functions return EUR/year unless stated otherwise.
 from __future__ import annotations
 
 
-
 def _validate_non_negative(value: float, name: str) -> None:
     """Validate that a numeric value is non-negative."""
     if value < 0:

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from math import ceil
 
+from uhs_costs.constants import HYSTORIES_COST_INFLATION
+
 #----------------------------------------------------------------------------------------------------
 # 
 #                                               Helpers
@@ -70,7 +72,7 @@ def epc4_salt_development_drilling_and_leaching_completion_cost_eur(
         * drilling_complexity_index
     )
 
-    return cost_keur * 1000
+    return cost_keur * 1000*HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -84,7 +86,7 @@ def epc1_salt_leaching_facilities_fixed_cost_eur() -> float:
 
     Returns EUR.
     """
-    return 50_000 * 1000
+    return 50_000 * 1000*HYSTORIES_COST_INFLATION
 
 
 def epc1_salt_leaching_facilities_wellhead_cost_eur(
@@ -95,7 +97,7 @@ def epc1_salt_leaching_facilities_wellhead_cost_eur(
     Returns EUR.
     """
     _validate_positive_int(number_well_heads, "number_well_heads")
-    return 2350 * number_well_heads * 1000
+    return 2350 * number_well_heads * 1000 *HYSTORIES_COST_INFLATION
 
 
 def epc1_salt_leaching_facilities_pipeline_cost_eur(
@@ -114,7 +116,7 @@ def epc1_salt_leaching_facilities_pipeline_cost_eur(
         + brine_disposal_pipeline_length_km
     )
 
-    return cost_keur * 1000
+    return cost_keur * 1000*HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -148,14 +150,15 @@ def epc2_salt_leaching_cost_eur(
     )
 
     cost_keur = (
-        total_leaching_duration_years * (28 * number_caverns + 9500)
-        + number_caverns
-        * (
-            87.5
-            * (cost_of_electricity_eur_per_mwh / 60 + 1.4)
-            * leaching_duration_per_cavern_months
-            - 420
-        )
+        (
+            total_leaching_duration_years * (28 * number_caverns + 9500)
+            + number_caverns * (
+                87.5 * 1.4 * leaching_duration_per_cavern_months - 420
+            )
+        ) * HYSTORIES_COST_INFLATION
+        + number_caverns * 87.5
+        * (cost_of_electricity_eur_per_mwh / 60)
+        * leaching_duration_per_cavern_months
     )
 
     return cost_keur * 1000
@@ -179,7 +182,7 @@ def epc3_salt_conversion_time_scaled_cost_eur(
     Returns EUR.
     """
     _validate_positive(total_conversion_duration_years, "total_conversion_duration_years")
-    return 6750 * total_conversion_duration_years * 1000
+    return 6750 * total_conversion_duration_years * 1000 *HYSTORIES_COST_INFLATION
 
 
 def epc3_salt_conversion_fixed_cost_eur() -> float:
@@ -187,7 +190,7 @@ def epc3_salt_conversion_fixed_cost_eur() -> float:
 
     Returns EUR.
     """
-    return 1700 * 1000
+    return 1700 * 1000 *HYSTORIES_COST_INFLATION
 
 
 def epc3_salt_conversion_cavern_scaled_cost_eur(
@@ -204,11 +207,9 @@ def epc3_salt_conversion_cavern_scaled_cost_eur(
     _validate_positive(cost_of_electricity_eur_per_mwh, "cost_of_electricity_eur_per_mwh")
 
     cost_keur = number_well_heads * (
-        1.42
-        * cost_of_electricity_eur_per_mwh
-        / 60
+        1.42 * (cost_of_electricity_eur_per_mwh / 60)
         * free_gas_volume_per_cavern_thousand_m3
-        + 2780
+        + 2780 * HYSTORIES_COST_INFLATION
     )
 
     return cost_keur * 1000
@@ -245,7 +246,7 @@ def epc4_porous_production_well_drilling_cost_eur(
         * drilling_complexity_index
     )
 
-    return cost_keur * 1000
+    return cost_keur * 1000 *HYSTORIES_COST_INFLATION
 
 
 def epc4_porous_observation_well_drilling_cost_eur(
@@ -273,7 +274,7 @@ def epc4_porous_observation_well_drilling_cost_eur(
         * drilling_complexity_index
     )
 
-    return cost_keur * 1000
+    return cost_keur * 1000 *HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -298,7 +299,7 @@ def epc3_porous_first_gas_fill_cost_eur(
     _validate_positive(cost_of_electricity_eur_per_mwh, "cost_of_electricity_eur_per_mwh")
 
     cost_keur = (
-        2400 * first_gas_fill_duration_years
+        2400 * first_gas_fill_duration_years * HYSTORIES_COST_INFLATION
         + 2100 * cost_of_electricity_eur_per_mwh / 60
     )
 
@@ -356,7 +357,7 @@ def cushion_gas_cost_eur_simple(
     _validate_positive(hydrogen_cost_eur_per_kg, "hydrogen_cost_eur_per_kg")
 
     
-    return cushion_gas_mass_kg * hydrogen_cost_eur_per_kg
+    return cushion_gas_mass_kg * hydrogen_cost_eur_per_kg #no cost escalation necessary as h2 prices are 2025
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -397,14 +398,14 @@ def lrc_well_capex_eur(
     return number_well_heads * (
         fixed_cost_eur_per_well
         + variable_cost_eur_per_m * well_depth_m * drilling_complexity_index
-    )
+    ) #no cost escalation necessary, prices already adjusted
 
 
 def lrc_mining_capex_eur(
     excavation_volume_m3: float,
     mining_cost_eur_per_m3: float,
 ) -> float:
-    return excavation_volume_m3 * mining_cost_eur_per_m3
+    return excavation_volume_m3 * mining_cost_eur_per_m3 #no cost escalation necessary, prices already adjusted
 
 
 def lrc_lining_capex_eur(
@@ -419,7 +420,7 @@ def lrc_lining_capex_eur(
         + concrete_lining_mass_tonnes * concrete_lining_cost_eur_per_tonne
     )
 
-    return material_cost_eur * (1 + installation_fraction)
+    return material_cost_eur * (1 + installation_fraction) #no cost escalation necessary, prices already adjusted
 
 
 def lrc_drainage_capex_eur(
@@ -431,4 +432,4 @@ def lrc_drainage_capex_eur(
     return (
         tunnel_drainage_length_m * tunnel_drainage_cost_eur_per_m
         + total_cavern_drainage_length_m * cavern_drainage_cost_eur_per_m
-    )
+    ) #no cost escalation necessary, prices already adjusted

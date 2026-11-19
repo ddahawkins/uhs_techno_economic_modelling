@@ -10,6 +10,8 @@ equation components transparent and reusable in decomposed techno-economic
 models.
 """
 
+from uhs_costs.constants import HYSTORIES_COST_INFLATION
+
 #----------------------------------------------------------------------------------------------------
 # 
 #                                               EPC1
@@ -37,11 +39,11 @@ def epc1_compression_cost_eur(
         * total_installed_compression_brake_power_mw
     )
 
-    return cost_keur * 1000
+    return cost_keur * 1000 * HYSTORIES_COST_INFLATION
 
 def epc1_fixed_cost_eur() -> float:
     """HyStories EPC1 fixed process-plant component."""
-    return 20_700 * 1000
+    return 20_700 * 1000 *HYSTORIES_COST_INFLATION
 
 def epc1_withdrawal_cost_eur(
     withdrawal_flow_million_sm3_per_day: float,
@@ -70,7 +72,7 @@ def epc1_withdrawal_cost_eur(
                 * total_installed_withdrawal_compression_brake_power_mw
             )
 
-    return cost_keur * 1000
+    return cost_keur * 1000 *HYSTORIES_COST_INFLATION
 
 
 #----------------------------------------------------------------------------------------------------
@@ -86,14 +88,22 @@ def epc2_fieldlines_cost_eur(
         number_well_heads: int,
 ) -> float:
     """HyStories EPC2 costs associated with piping and field lines."""
-    return number_well_heads*(58.25*(1+0.742*material_cost_factor_withdrawal)*operating_pressure_ratio*withdrawal_flow_million_sm3_per_day)*1000
+    return (
+        number_well_heads
+            *(
+                58.25*(1+0.742*material_cost_factor_withdrawal)
+                *operating_pressure_ratio
+                *withdrawal_flow_million_sm3_per_day
+            )
+            *1000 * HYSTORIES_COST_INFLATION
+    )
 
 def epc2_instrumentation_cost_eur(
         material_cost_factor_withdrawal: float,
         number_well_heads: int,
 ) -> float:
     """HyStories EPC2 costs associated with wellhead separators, instrumentation, and valves"""
-    return number_well_heads*(1605*(1+0.476*material_cost_factor_withdrawal))*1000
+    return number_well_heads*(1605*(1+0.476*material_cost_factor_withdrawal))*1000 * HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -108,7 +118,7 @@ def epc3_well_interconnection_cost_eur(
     additional_field_line_length_km: float,
 ) -> float:
     """Original HyStories EPC3 cost for well interconnection."""
-    return 117*additional_field_line_length_km*(1+0.743*material_cost_factor_withdrawal)*(operating_pressure_ratio*withdrawal_flow_million_sm3_per_day+1.9)*1000
+    return 117*additional_field_line_length_km*(1+0.743*material_cost_factor_withdrawal)*(operating_pressure_ratio*withdrawal_flow_million_sm3_per_day+1.9)*1000*HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -122,7 +132,7 @@ def epc4_purification_cost_eur(
 
 ) -> float:
     """Original HyStories EPC4 cost for hydrogen purification."""
-    return purification_factor*42500*withdrawal_flow_million_sm3_per_day**0.65 *1000
+    return purification_factor*42500*withdrawal_flow_million_sm3_per_day**0.65 *1000 *HYSTORIES_COST_INFLATION
 
 #----------------------------------------------------------------------------------------------------
 # 
@@ -132,7 +142,7 @@ def epc4_purification_cost_eur(
 
 def epc5_fixed_cost_eur() -> float:
     """ HyStories EPC5 fixed BOP cost."""
-    return 8000*1000
+    return 8000*1000 * HYSTORIES_COST_INFLATION
 
 def epc5_proportional_cost_eur(
         cost: float,
