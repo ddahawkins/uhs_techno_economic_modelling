@@ -97,8 +97,8 @@ class CostMethod(StrEnum):
 # designs remain fixed at their technology-specific EPR and WTIR=2.
 STUDY_EPR_FACTOR_RANGE = (0.5, 1.5)
 STUDY_WTIR_RANGE = (1.0, 5.0)
-STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10), 1.0]))
-STUDY_WTIR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_WTIR_RANGE[0], STUDY_WTIR_RANGE[-1], 10), 2.0]))
+STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10)]))
+STUDY_WTIR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_WTIR_RANGE[0], STUDY_WTIR_RANGE[-1], 10)]))
 
 
 @dataclass(frozen=True)

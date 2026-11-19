@@ -18,7 +18,7 @@ EPR/WTIR applicability bounds and selected operational parameters:
 An absent process or unspecified assumption is exported as a null/blank.
 
 The study exports one instance per formulation and technology. The reference
-design remains at its technology-specific EPR and WTIR=2.5. Cross-driver
+design remains at its technology-specific EPR and WTIR=2.0. Cross-driver
 capital rates are fitted on the expanded EPR/WTIR training grid while holding
 the reference working-gas capacity fixed.
 
@@ -330,9 +330,9 @@ def build_experiment_table() -> pd.DataFrame:
                 epr_factor_range=experiment.epr_factor_range,
                 wtir_range=experiment.wtir_range,
                 # Calibration reference remains technology-specific EPR and
-                # WTIR=2.5, regardless of the much wider fitting domain.
+                # WTIR=2.0, regardless of the much wider fitting domain.
                 epr_factor_override=1.0,
-                wtir_override=2.5,
+                wtir_override=2.0,
                 # Exactly one FX coefficient set, trained on 7 x 10 designs.
                 fx_training_epr_factors=(
                     STUDY_EPR_FACTOR_TRAINING
