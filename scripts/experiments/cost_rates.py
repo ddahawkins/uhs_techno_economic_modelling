@@ -22,8 +22,11 @@ economies-of-scale sensitivity. Least-squares minimises component unit-rate erro
 need not reproduce the detailed cost at its centre; this approximation error
 is reported rather than removed by anchoring.
 
-Grid points are bin MIDPOINTS. The reference design is not forced into the
-sample set.
+By default grid points are bin MIDPOINTS. For a single cost sample, the
+calibration centre can be overridden independently of the applicability
+interval. FX training points can likewise be supplied independently, including
+interval endpoints. This preserves the original reference design while
+exploring a broader FX fitting domain.
 
 Applicability intervals are metadata. The CEM must decide how to enforce
 them, including whether ratios are fixed or bounded.
@@ -89,6 +92,15 @@ class CostMethod(StrEnum):
     FULLY_DECOUPLED_CROSS_DRIVER = "fully_decoupled_cross_driver"
 
 
+# The ranges below describe the single-sample FX evaluation domain, NOT a
+# physical feasibility envelope for individual UHS facilities. Reference
+# designs remain fixed at their technology-specific EPR and WTIR=2.
+STUDY_EPR_FACTOR_RANGE = (0.5, 1.5)
+STUDY_WTIR_RANGE = (1.0, 5.0)
+STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10), 1.0]))
+STUDY_WTIR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_WTIR_RANGE[0], STUDY_WTIR_RANGE[-1], 10), 2.0]))
+
+
 @dataclass(frozen=True)
 class SamplingConfig:
     technology: str
@@ -98,10 +110,20 @@ class SamplingConfig:
     n_wtir: int = 1
 
     # EPR is a factor of the technology-specific reference EPR.
-    epr_factor_range: tuple[float, float] = (0.5, 1.5)
+    epr_factor_range: tuple[float, float] = STUDY_EPR_FACTOR_RANGE
 
     # WTIR is an absolute ratio.
-    wtir_range: tuple[float, float] = (1.0, 4.0)
+    wtir_range: tuple[float, float] = STUDY_WTIR_RANGE
+
+    # Explicit reference point for a ONE-CELL sample. None retains the legacy
+    # bin-midpoint convention. Do not conflate the fit domain and this point.
+    epr_factor_override: float | None = None
+    wtir_override: float | None = None
+
+    # Explicit local training coordinates for FX, independent of the number
+    # of exported cost samples. None retains the legacy interior 3x3 grid.
+    fx_training_epr_factors: tuple[float, ...] | None = None
+    fx_training_wtir_values: tuple[float, ...] | None = None
 
 @dataclass(frozen=True)
 class Interval:
@@ -247,6 +269,53 @@ def validate_config(config: SamplingConfig) -> CostMethod:
                 "with finite values."
             )
 
+    for name, value, bounds, cell_count in (
+        (
+            "epr_factor_override",
+            config.epr_factor_override,
+            config.epr_factor_range,
+            config.n_epr,
+        ),
+        (
+            "wtir_override",
+            config.wtir_override,
+            config.wtir_range,
+            config.n_wtir,
+        ),
+    ):
+        if value is None:
+            continue
+        if cell_count != 1:
+            raise ValueError(f"{name} requires a single sample on its axis.")
+        if not (isfinite(value) and bounds[0] <= value <= bounds[1]):
+            raise ValueError(f"{name}={value} must lie within {bounds}.")
+
+    for name, values, bounds in (
+        (
+            "fx_training_epr_factors",
+            config.fx_training_epr_factors,
+            config.epr_factor_range,
+        ),
+        (
+            "fx_training_wtir_values",
+            config.fx_training_wtir_values,
+            config.wtir_range,
+        ),
+    ):
+        if values is None:
+            continue
+        if (config.n_epr, config.n_wtir) != (1, 1):
+            raise ValueError(f"{name} requires one EPR/WTIR sample cell.")
+        if (
+            len(values) < 2
+            or any(not isfinite(value) for value in values)
+            or any(not bounds[0] <= value <= bounds[1] for value in values)
+            or any(left >= right for left, right in zip(values, values[1:]))
+        ):
+            raise ValueError(
+                f"{name} must contain at least two strictly increasing "
+                f"finite values within {bounds}."
+            )
 
     return method
 
@@ -493,13 +562,16 @@ def local_training_cases(
     spec: TechnologySpec,
     epr_factor_interval: Interval,
     wtir_interval: Interval,
+    training_epr_factors: tuple[float, ...] | None = None,
+    training_wtir_values: tuple[float, ...] | None = None,
 ) -> list[tuple[dict[CostDriver, float], CostBreakdown]]:
-    """Evaluate a small regular grid *inside* one sample's validity cell.
+    """Evaluate the specified grid within one sample's validity cell.
 
-    Storage capacity stays fixed at the reference facility size. EPR and WTIR
-    points lie 20%, 50%, and 80% of the way across each interval so we do not
-    evaluate adjacent cells' shared boundaries. These two ratio sensitivities
-    identify both slopes of all three cross-driver cost representations.
+    Storage capacity stays fixed at the reference facility size. Explicit
+    training coordinates may include the endpoints. In their absence, the
+    legacy grid uses points at 20%, 50%, and 80% of each interval, avoiding
+    adjacent cells' shared boundaries. Both ratio sensitivities identify the
+    slopes of all three cross-driver cost representations.
 
     No global EPR >= 0.9 cutoff applies: low-EPR samples must learn from
     their own region, including any nonlinear or discontinuous behaviour.
@@ -514,18 +586,36 @@ def local_training_cases(
 
     storage_gwh = spec.default_storage_capacity_gwh_lhv
 
+    epr_factors = (
+        training_epr_factors
+        if training_epr_factors is not None
+        else interior_grid(epr_factor_interval)
+    )
+    wtir_values = (
+        training_wtir_values
+        if training_wtir_values is not None
+        else interior_grid(wtir_interval)
+    )
+
     cases = []
     for epr_factor, wtir in product(
-        interior_grid(epr_factor_interval),
-        interior_grid(wtir_interval),
+        epr_factors,
+        wtir_values,
     ):
         epr_days = epr_factor * spec.default_epr_days
         capacities = design_capacities(
             spec, epr_days=epr_days, wtir=wtir, storage_gwh=storage_gwh
         )
-        breakdown = evaluate_design(
-            spec, storage_gwh=storage_gwh, epr_days=epr_days, wtir=wtir
-        )
+        try:
+            breakdown = evaluate_design(
+                spec, storage_gwh=storage_gwh, epr_days=epr_days, wtir=wtir
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"FX training cost evaluation failed for {spec.technology} "
+                f"at EPR factor {epr_factor:g} (EPR {epr_days:g} days), "
+                f"WTIR {wtir:g}."
+            ) from exc
         cases.append((capacities, breakdown))
 
     return cases
@@ -598,6 +688,8 @@ def cross_driver_cost_mapping(
     capacities: dict[CostDriver, float],
     epr_factor_interval: Interval,
     wtir_interval: Interval,
+    training_epr_factors: tuple[float, ...] | None = None,
+    training_wtir_values: tuple[float, ...] | None = None,
 ) -> tuple[CostBreakdown, tuple[FitDiagnostic, ...]]:
     """Build an LP-compatible two-slope model for one design-space cell."""
 
@@ -605,6 +697,8 @@ def cross_driver_cost_mapping(
         spec=spec,
         epr_factor_interval=epr_factor_interval,
         wtir_interval=wtir_interval,
+        training_epr_factors=training_epr_factors,
+        training_wtir_values=training_wtir_values,
     )
 
     # Detailed source cost -> (primary driver, additional driver).
@@ -725,6 +819,11 @@ def generate_cost_samples(
         config.n_wtir,
     )
 
+    if config.epr_factor_override is not None:
+        epr_grid = ((config.epr_factor_override, epr_grid[0][1]),)
+    if config.wtir_override is not None:
+        wtir_grid = ((config.wtir_override, wtir_grid[0][1]),)
+
     samples = []
 
     for (
@@ -772,6 +871,8 @@ def generate_cost_samples(
                 capacities=capacities,
                 epr_factor_interval=epr_factor_interval,
                 wtir_interval=wtir_interval,
+                training_epr_factors=config.fx_training_epr_factors,
+                training_wtir_values=config.fx_training_wtir_values,
             )
 
         else:
@@ -1607,10 +1708,28 @@ def main() -> None:
     parser.add_argument("--n-epr", type=int, default=1)
     parser.add_argument("--n-wtir", type=int, default=1)
 
-    parser.add_argument("--epr-min-factor", type=float, default=0.5)
-    parser.add_argument("--epr-max-factor", type=float, default=1.5)
-    parser.add_argument("--wtir-min", type=float, default=1.0)
-    parser.add_argument("--wtir-max", type=float, default=4.0)
+    parser.add_argument("--epr-min-factor", type=float, default=STUDY_EPR_FACTOR_RANGE[0])
+    parser.add_argument("--epr-max-factor", type=float, default=STUDY_EPR_FACTOR_RANGE[1])
+    parser.add_argument("--wtir-min", type=float, default=STUDY_WTIR_RANGE[0])
+    parser.add_argument("--wtir-max", type=float, default=STUDY_WTIR_RANGE[1])
+    parser.add_argument(
+        "--reference-epr-factor", type=float, default=1.0,
+        help="Single-sample reference EPR factor; fixed at 1.0 by default.",
+    )
+    parser.add_argument(
+        "--reference-wtir", type=float, default=2.0,
+        help="Single-sample reference WTIR; fixed at 2.0 by default.",
+    )
+    parser.add_argument(
+        "--fx-training-epr-factors", type=float, nargs="+",
+        default=STUDY_EPR_FACTOR_TRAINING,
+        help="FX training EPR factors (default: 0.25 0.5 0.75 1 2 3 4).",
+    )
+    parser.add_argument(
+        "--fx-training-wtir", type=float, nargs="+",
+        default=STUDY_WTIR_TRAINING,
+        help="FX training WTIR values (default: integers 1 through 10).",
+    )
 
     parser.add_argument(
         "--csv",
@@ -1667,6 +1786,24 @@ def main() -> None:
         wtir_range=(
             args.wtir_min,
             args.wtir_max,
+        ),
+        epr_factor_override=(
+            args.reference_epr_factor if args.n_epr == 1 else None
+        ),
+        wtir_override=(
+            args.reference_wtir if args.n_wtir == 1 else None
+        ),
+        fx_training_epr_factors=(
+            tuple(args.fx_training_epr_factors)
+            if args.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
+            and (args.n_epr, args.n_wtir) == (1, 1)
+            else None
+        ),
+        fx_training_wtir_values=(
+            tuple(args.fx_training_wtir)
+            if args.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
+            and (args.n_epr, args.n_wtir) == (1, 1)
+            else None
         ),
     )
 

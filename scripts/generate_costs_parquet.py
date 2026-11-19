@@ -17,9 +17,10 @@ EPR/WTIR applicability bounds and selected operational parameters:
 
 An absent process or unspecified assumption is exported as a null/blank.
 
-The sampler's original fitting logic is unchanged. In particular, cross-driver
-rates are fitted locally within each sample's EPR/WTIR interval, holding the
-reference working-gas capacity fixed.
+The study exports one instance per formulation and technology. The reference
+design remains at its technology-specific EPR and WTIR=2.5. Cross-driver
+capital rates are fitted on the expanded EPR/WTIR training grid while holding
+the reference working-gas capacity fixed.
 
 Requires pandas, scipy and a Parquet engine (pyarrow): ``pixi add pyarrow`` if needed.
 """
@@ -52,6 +53,10 @@ from scripts.experiments.cost_rates import (
     CostMethod,
     SampledCostSet,
     SamplingConfig,
+    STUDY_EPR_FACTOR_RANGE,
+    STUDY_WTIR_RANGE,
+    STUDY_EPR_FACTOR_TRAINING,
+    STUDY_WTIR_TRAINING,
     generate_cost_samples,
     get_technology,
 )
@@ -97,18 +102,15 @@ class Experiment:
     method: CostMethod | str
     n_epr: int
     n_wtir: int
-    epr_factor_range: tuple[float, float] = (0.5, 1.5)
-    wtir_range: tuple[float, float] = (1.0, 4.0)
+    epr_factor_range: tuple[float, float] = STUDY_EPR_FACTOR_RANGE
+    wtir_range: tuple[float, float] = STUDY_WTIR_RANGE
 
 
 EXPERIMENTS = (
     Experiment("B1", "bundled", 1, 1),
-    Experiment("B9", "bundled", 3, 3),
     Experiment("P1", "partially_decoupled", 1, 1),
     Experiment("F1", "fully_decoupled", 1, 1),
     Experiment("FX1", "fully_decoupled_cross_driver", 1, 1),
-    Experiment("FX2", "fully_decoupled_cross_driver", 2, 1),
-    Experiment("FX4", "fully_decoupled_cross_driver", 2, 2),
 )
 
 
@@ -327,6 +329,21 @@ def build_experiment_table() -> pd.DataFrame:
                 n_wtir=experiment.n_wtir,
                 epr_factor_range=experiment.epr_factor_range,
                 wtir_range=experiment.wtir_range,
+                # Calibration reference remains technology-specific EPR and
+                # WTIR=2.5, regardless of the much wider fitting domain.
+                epr_factor_override=1.0,
+                wtir_override=2.5,
+                # Exactly one FX coefficient set, trained on 7 x 10 designs.
+                fx_training_epr_factors=(
+                    STUDY_EPR_FACTOR_TRAINING
+                    if experiment.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
+                    else None
+                ),
+                fx_training_wtir_values=(
+                    STUDY_WTIR_TRAINING
+                    if experiment.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
+                    else None
+                ),
             )
             samples = generate_cost_samples(config)
             if len(samples) != experiment.n_epr * experiment.n_wtir:

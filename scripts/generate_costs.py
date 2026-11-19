@@ -2,6 +2,10 @@ from pathlib import Path
 
 from scripts.experiments.cost_rates import (
     SamplingConfig,
+    STUDY_EPR_FACTOR_RANGE,
+    STUDY_WTIR_RANGE,
+    STUDY_EPR_FACTOR_TRAINING,
+    STUDY_WTIR_TRAINING,
     generate_cost_samples,
     write_sample_summary,
     write_sample_plots,
@@ -10,7 +14,8 @@ from scripts.experiments.cost_rates import (
 
 OUTPUT_DIR = Path("outputs/cost_rate_samples")
 
-# Technology and experimental configurations
+# The study exports one cost set per technology/formulation. Keep the 1 suffix
+# in the output file names for compatibility with existing scenario files.
 TECHNOLOGIES = [
     "aquifer",
     "salt_cavern",
@@ -20,13 +25,13 @@ TECHNOLOGIES = [
 
 EXPERIMENTS = {
     "B1": ("bundled", 1, 1),
-    "B30": ("bundled", 6, 5),
     "P1": ("partially_decoupled", 1, 1),
     "F1": ("fully_decoupled", 1, 1),
     "FX1": ("fully_decoupled_cross_driver", 1, 1),
-    "FX6": ("fully_decoupled_cross_driver", 3, 2),
 }
 
+# Individual TCR PDFs can be expensive (they re-evaluate the detailed model).
+# For side-by-side B/P/F/FX comparisons use compare_cost_formulations.py.
 GENERATE_PLOTS = False
 
 
@@ -39,6 +44,16 @@ def main():
                 method=method,
                 n_epr=n_epr,
                 n_wtir=n_wtir,
+                epr_factor_range=STUDY_EPR_FACTOR_RANGE,
+                wtir_range=STUDY_WTIR_RANGE,
+                epr_factor_override=1.0,
+                wtir_override=2.5,
+                fx_training_epr_factors=(
+                    STUDY_EPR_FACTOR_TRAINING if experiment == "FX1" else None
+                ),
+                fx_training_wtir_values=(
+                    STUDY_WTIR_TRAINING if experiment == "FX1" else None
+                ),
             )
 
             # Generate the samples
