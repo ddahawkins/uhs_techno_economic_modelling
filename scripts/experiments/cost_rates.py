@@ -229,6 +229,12 @@ class TcrErrorGrid:
 
 CAPITAL_TYPES = (CostType.CAPEX, CostType.ABEX)
 
+FX_FITTED_TYPES = (
+    CostType.CAPEX,
+    CostType.ABEX,
+    CostType.FIXED_OPEX,
+)
+
 CAPACITY_DRIVERS = (
     CostDriver.STORAGE,
     CostDriver.INJECTION,
@@ -728,12 +734,12 @@ def cross_driver_cost_mapping(
     # CAPEX and ABEX are fitted separately to preserve cost classification.
     coefficients = {
         typ: {driver: 0.0 for driver in CAPACITY_DRIVERS}
-        for typ in CAPITAL_TYPES
+        for typ in FX_FITTED_TYPES
     }
 
     diagnostics = []
 
-    for typ in CAPITAL_TYPES:
+    for typ in FX_FITTED_TYPES:
         for source, own, additional in models:
             rates, diagnostic = fit_local_two_driver(
                 cases=cases,
@@ -752,7 +758,7 @@ def cross_driver_cost_mapping(
     # These represent linear objective terms, not physical EPC components.
     mapped_components = []
 
-    for typ in CAPITAL_TYPES:
+    for typ in FX_FITTED_TYPES:
         for driver in CAPACITY_DRIVERS:
             rate = coefficients[typ][driver]
             capacity = capacities[driver]
@@ -770,9 +776,17 @@ def cross_driver_cost_mapping(
                     cost_driver=driver,
                     driver_value=capacity,
                     cost_unit=(
-                        CostUnit.EUR_PER_KWH
-                        if driver == CostDriver.STORAGE
-                        else CostUnit.EUR_PER_KW
+                        (
+                            CostUnit.EUR_PER_KWH_YEAR
+                            if driver == CostDriver.STORAGE
+                            else CostUnit.EUR_PER_KW_YEAR
+                        )
+                        if typ == CostType.FIXED_OPEX
+                        else (
+                            CostUnit.EUR_PER_KWH
+                            if driver == CostDriver.STORAGE
+                            else CostUnit.EUR_PER_KW
+                        )
                     ),
                     notes=(
                         "Synthetic unanchored local cross-driver investment "
@@ -785,7 +799,7 @@ def cross_driver_cost_mapping(
     mapped_components.extend(
         component
         for component in detailed.components
-        if component.cost_type not in CAPITAL_TYPES
+        if component.cost_type not in FX_FITTED_TYPES
     )
 
     mapped = CostBreakdown(
@@ -1009,7 +1023,11 @@ def _sample_source_capital_cost(
                 * capacities[diagnostic.additional_driver]
             )
             for diagnostic in sample.cross_driver_diagnostics
-            if diagnostic.group == source.value
+            if (
+                diagnostic.group == source.value
+                and diagnostic.cost_type
+                in {typ.value for typ in CAPITAL_TYPES}
+            )
         )
 
     driver = source
@@ -1667,9 +1685,24 @@ def write_sample_summary(
             "VOM_injection_EUR_per_kWh": s.vom_rates.injection,
             "VOM_withdrawal_EUR_per_kWh": s.vom_rates.withdrawal,
             "centre_TCR_error_pct": s.centre_tcr_error_pct,
-            "local_fit_max_APE_pct": (
-                max(d.max_absolute_percentage_error for d in s.cross_driver_diagnostics)
-                if s.cross_driver_diagnostics else 0.0
+            "local_fit_max_APE_pct": max(
+                (
+                    d.max_absolute_percentage_error
+                    for d in s.cross_driver_diagnostics
+                    if d.cost_type in {
+                        CostType.CAPEX.value,
+                        CostType.ABEX.value,
+                    }
+                ),
+                default=0.0,
+            ),
+            "local_FOM_fit_max_APE_pct": max(
+                (
+                    d.max_absolute_percentage_error
+                    for d in s.cross_driver_diagnostics
+                    if d.cost_type == CostType.FIXED_OPEX.value
+                ),
+                default=0.0,
             ),
         })
 
