@@ -47,7 +47,7 @@ def main():
                 epr_factor_range=STUDY_EPR_FACTOR_RANGE,
                 wtir_range=STUDY_WTIR_RANGE,
                 epr_factor_override=1.0,
-                wtir_override=2.5,
+                wtir_override=3,
                 fx_training_epr_factors=(
                     STUDY_EPR_FACTOR_TRAINING if experiment == "FX1" else None
                 ),

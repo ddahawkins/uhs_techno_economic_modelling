@@ -185,7 +185,7 @@ RESERVOIR_SAMPLE_SORT: Literal["input", "Site", "storage_tcr"] = "input"
 SELECTED_ECONOMIC_MEDOIDS = {
     "depleted_gas_field": "Sabbioncello",
     "aquifer": "Gournay Sur Aronde",
-    "salt_cavern": "Xanten",
+    "salt_cavern": "Manosque",
     "lined_rock_cavern": "Skallen",
 }
 

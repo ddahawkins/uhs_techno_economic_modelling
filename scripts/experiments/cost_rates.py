@@ -94,7 +94,7 @@ class CostMethod(StrEnum):
 
 # The ranges below describe the single-sample FX evaluation domain, NOT a
 # physical feasibility envelope for individual UHS facilities. Reference
-# designs remain fixed at their technology-specific EPR and WTIR=2.
+# designs remain fixed at their technology-specific EPR and WTIR.
 STUDY_EPR_FACTOR_RANGE = (0.5, 1.5)
 STUDY_WTIR_RANGE = (1.0, 5.0)
 STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10)]))
@@ -1717,8 +1717,8 @@ def main() -> None:
         help="Single-sample reference EPR factor; fixed at 1.0 by default.",
     )
     parser.add_argument(
-        "--reference-wtir", type=float, default=2.0,
-        help="Single-sample reference WTIR; fixed at 2.0 by default.",
+        "--reference-wtir", type=float, default=3.0,
+        help="Single-sample reference WTIR; fixed at 3.0 by default.",
     )
     parser.add_argument(
         "--fx-training-epr-factors", type=float, nargs="+",
