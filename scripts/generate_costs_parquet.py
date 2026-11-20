@@ -303,7 +303,19 @@ def sample_record(experiment_id: str, sample: SampledCostSet) -> dict:
         "VOM_withdrawal_EUR_per_kWh": sample.vom_rates.withdrawal,
         "centre_TCR_error_pct": sample.centre_tcr_error_pct,
         "local_fit_max_APE_pct": max(
-            (d.max_absolute_percentage_error for d in sample.cross_driver_diagnostics),
+            (
+                d.max_absolute_percentage_error
+                for d in sample.cross_driver_diagnostics
+                if d.cost_type in ("capex", "abex")
+            ),
+            default=0.0,
+        ),
+        "local_FOM_fit_max_APE_pct": max(
+            (
+                d.max_absolute_percentage_error
+                for d in sample.cross_driver_diagnostics
+                if d.cost_type == "fixed_opex"
+            ),
             default=0.0,
         ),
         **operational_record(sample),
