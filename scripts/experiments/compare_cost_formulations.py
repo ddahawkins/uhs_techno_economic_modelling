@@ -67,7 +67,7 @@ FORMULATIONS = {
 
 # 190 mm wide: Elsevier two-column format. Font sizes remain legible at 100%.
 WIDTH_INCH = 190 / 25.4
-REFERENCE_WTIR = 2.0
+REFERENCE_WTIR = 3.0
 PLASMA = plt.get_cmap("plasma")
 FORMULATION_COLOURS = {
     "B": PLASMA(0.10),
