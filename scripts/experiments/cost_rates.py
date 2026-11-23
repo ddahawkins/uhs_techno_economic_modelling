@@ -14,9 +14,10 @@ Each sample contains:
     - Fixed and variable OPEX rates
     - Applicable EPR and WTIR intervals
 
-For the cross-driver method only, coefficients are fitted independently in
-each sample's EPR/WTIR cell at the technology's reference storage capacity.
-Varying EPR and WTIR identifies both slopes without introducing an unwanted
+For the cross-driver method only, three coefficients per source cost group are
+fitted independently in each sample's EPR/WTIR cell at the technology's
+reference storage capacity. Varying EPR and WTIR identifies the three slopes
+without introducing an unwanted
 economies-of-scale sensitivity. Least-squares minimises component unit-rate error
 (EUR/kW or EUR/kWh), not absolute project-cost error. A sample's fitted total
 need not reproduce the detailed cost at its centre; this approximation error
@@ -71,7 +72,7 @@ from uhs_costs.cost_model.helpers.cost_components import (
     CostUnit,
     HyStoriesGroup,
 )
-from uhs_costs.analysis.linear_cost_fit import fit_two_driver_cost
+from uhs_costs.analysis.linear_cost_fit import fit_three_driver_cost
 
 from scripts.experiments.linearisation_sensitivity import (
     TECHNOLOGIES,
@@ -95,8 +96,8 @@ class CostMethod(StrEnum):
 # The ranges below describe the single-sample FX evaluation domain, NOT a
 # physical feasibility envelope for individual UHS facilities. Reference
 # designs remain fixed at their technology-specific EPR and WTIR.
-STUDY_EPR_FACTOR_RANGE = (0.5, 1.5)
-STUDY_WTIR_RANGE = (1.0, 5.0)
+STUDY_EPR_FACTOR_RANGE = (0.5, 2.0)
+STUDY_WTIR_RANGE = (1.0, 10.0)
 STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10)]))
 STUDY_WTIR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_WTIR_RANGE[0], STUDY_WTIR_RANGE[-1], 10)]))
 
@@ -174,8 +175,10 @@ class FitDiagnostic:
     # their sum, aggregated by destination capacity driver.
     own_driver: CostDriver
     additional_driver: CostDriver
+    third_driver: CostDriver
     own_coefficient: float
     additional_coefficient: float
+    third_coefficient: float
 
 
 @dataclass(frozen=True)
@@ -627,14 +630,15 @@ def local_training_cases(
     return cases
 
 
-def fit_local_two_driver(
+def fit_local_three_driver(
     cases: list[tuple[dict[CostDriver, float], CostBreakdown]],
     cost_type: CostType,
     source_driver: CostDriver,
     own_driver: CostDriver,
     second_driver: CostDriver,
+    third_driver: CostDriver,
 ) -> tuple[dict[CostDriver, float], FitDiagnostic]:
-    """Fit two free slopes in component unit rates and report local errors."""
+    """Fit three free capacity slopes in component unit rates and report errors."""
 
     own = np.asarray([
         capacities[own_driver]
@@ -643,6 +647,11 @@ def fit_local_two_driver(
 
     secondary = np.asarray([
         capacities[second_driver]
+        for capacities, _ in cases
+    ])
+
+    tertiary = np.asarray([
+        capacities[third_driver]
         for capacities, _ in cases
     ])
 
@@ -658,15 +667,16 @@ def fit_local_two_driver(
     # An absent cost group is represented by a zero coefficient, not a
     # numerically unstable regression against an all-zero target.
     if np.allclose(y, 0.0, atol=1e-8, rtol=0):
-        a = b = 0.0
+        a = b = c = 0.0
     else:
-        a, b = fit_two_driver_cost(
+        a, b, c = fit_three_driver_cost(
             own_capacity=own,
             secondary_capacity=secondary,
+            tertiary_capacity=tertiary,
             detailed_cost=y,
         )
 
-    prediction = a * own + b * secondary
+    prediction = a * own + b * secondary + c * tertiary
     nonzero = np.abs(y) > 1e-8
     percentage_errors = (
         100.0 * np.abs(prediction[nonzero] - y[nonzero]) / np.abs(y[nonzero])
@@ -682,11 +692,13 @@ def fit_local_two_driver(
         ),
         own_driver=own_driver,
         additional_driver=second_driver,
+        third_driver=third_driver,
         own_coefficient=float(a),
         additional_coefficient=float(b),
+        third_coefficient=float(c),
     )
 
-    return {own_driver: a, second_driver: b}, diagnostic
+    return {own_driver: a, second_driver: b, third_driver: c}, diagnostic
 
 def cross_driver_cost_mapping(
     spec: TechnologySpec,
@@ -697,7 +709,7 @@ def cross_driver_cost_mapping(
     training_epr_factors: tuple[float, ...] | None = None,
     training_wtir_values: tuple[float, ...] | None = None,
 ) -> tuple[CostBreakdown, tuple[FitDiagnostic, ...]]:
-    """Build an LP-compatible two-slope model for one design-space cell."""
+    """Build an LP-compatible three-driver model for one design-space cell."""
 
     cases = local_training_cases(
         spec=spec,
@@ -707,26 +719,28 @@ def cross_driver_cost_mapping(
         training_wtir_values=training_wtir_values,
     )
 
-    # Detailed source cost -> (primary driver, additional driver).
-    #
-    # Storage costs can depend on P_out through EPR.
-    # Injection costs can depend on P_out as well as P_in through WTIR.
-    # Withdrawal costs can depend on E as well as P_out through EPR.
+    # Detailed source cost -> (primary driver, second driver, third driver).
+    # Give each physical source stage the same three independent regressors.
+    # Their fitted costs are aggregated by CEM capacity driver, leaving only
+    # three effective cost coefficients per cost type in the LP objective.
     models = (
         (
             CostDriver.STORAGE,
             CostDriver.STORAGE,
             CostDriver.WITHDRAWAL,
+            CostDriver.INJECTION,
         ),
         (
             CostDriver.INJECTION,
             CostDriver.INJECTION,
             CostDriver.WITHDRAWAL,
+            CostDriver.STORAGE,
         ),
         (
             CostDriver.WITHDRAWAL,
             CostDriver.WITHDRAWAL,
             CostDriver.STORAGE,
+            CostDriver.INJECTION,
         ),
     )
 
@@ -740,14 +754,27 @@ def cross_driver_cost_mapping(
     diagnostics = []
 
     for typ in FX_FITTED_TYPES:
-        for source, own, additional in models:
-            rates, diagnostic = fit_local_two_driver(
+        for source, own, additional, third in models:
+            rates, diagnostic = fit_local_three_driver(
                 cases=cases,
                 cost_type=typ,
                 source_driver=source,
                 own_driver=own,
                 second_driver=additional,
+                third_driver=third,
             )
+
+            # Do not permit negative source-stage slopes to be hidden by the
+            # aggregation into otherwise-positive CEM capacity coefficients.
+            negatives = {driver.value: rate for driver, rate in rates.items() if rate < 0.0}
+            if negatives:
+                raise ValueError(
+                    f"Negative FX three-driver coefficient(s) for {spec.technology}, "
+                    f"{typ.value}/{source.value}, EPR factors "
+                    f"[{epr_factor_interval.lower:g}, {epr_factor_interval.upper:g}], "
+                    f"WTIR [{wtir_interval.lower:g}, {wtir_interval.upper:g}]: "
+                    f"{negatives}. No cost rates will be exported."
+                )
 
             for driver, rate in rates.items():
                 coefficients[typ][driver] += rate
@@ -789,13 +816,13 @@ def cross_driver_cost_mapping(
                         )
                     ),
                     notes=(
-                        "Synthetic unanchored local cross-driver investment "
-                        "coefficient; not a physical component."
+                        "Synthetic unanchored three-driver cost coefficient; "
+                        "not a physical component."
                     ),
                 )
             )
 
-    # Retain FOM and throughput VOM without cross-driver fitting.
+    # Retain throughput VOM; CAPEX, ABEX and fixed OPEX are all fitted above.
     mapped_components.extend(
         component
         for component in detailed.components
@@ -1028,6 +1055,8 @@ def _sample_source_capital_cost(
                 * capacities[diagnostic.own_driver]
                 + diagnostic.additional_coefficient
                 * capacities[diagnostic.additional_driver]
+                + diagnostic.third_coefficient
+                * capacities[diagnostic.third_driver]
             )
             for diagnostic in sample.cross_driver_diagnostics
             if (
