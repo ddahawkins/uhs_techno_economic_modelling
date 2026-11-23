@@ -42,8 +42,8 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
 
 # Only EPR (days) and WTIR (withdrawal/injection ratio) are fixed. Each site's
 # capacity E comes from its "H2 reference working GWh" CSV field.
-REFERENCE_RATIOS = {"DGF": (66., 3), "SA": (66., 3),
-                    "SC": (12., 3), "LRC": (7.5, 3)}
+REFERENCE_RATIOS = {"DGF": (66., 2), "SA": (66., 2),
+                    "SC": (12., 2), "LRC": (7.5, 2)}
 CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
 DESIGN_RANGES = {
     "DGF": ((33., 66., 100.), (1., 2., 3.)),

@@ -833,6 +833,13 @@ def generate_cost_samples(
         config.n_wtir,
     )
 
+    # A one-cell catalogue is anchored to the authoritative technology design.
+    # Never silently use the midpoint of an unrelated sampling interval as its
+    # reference point (e.g. 1..5 would otherwise make WTIR=3).
+    if config.n_epr == 1 and config.epr_factor_override is None:
+        epr_grid = ((1.0, epr_grid[0][1]),)
+    if config.n_wtir == 1 and config.wtir_override is None:
+        wtir_grid = ((spec.default_wtir, wtir_grid[0][1]),)
     if config.epr_factor_override is not None:
         epr_grid = ((config.epr_factor_override, epr_grid[0][1]),)
     if config.wtir_override is not None:
@@ -1746,12 +1753,12 @@ def main() -> None:
     parser.add_argument("--wtir-min", type=float, default=STUDY_WTIR_RANGE[0])
     parser.add_argument("--wtir-max", type=float, default=STUDY_WTIR_RANGE[1])
     parser.add_argument(
-        "--reference-epr-factor", type=float, default=1.0,
-        help="Single-sample reference EPR factor; fixed at 1.0 by default.",
+        "--reference-epr-factor", type=float, default=None,
+        help="Optional explicit EPR factor; omitted = technology-specific reference EPR.",
     )
     parser.add_argument(
-        "--reference-wtir", type=float, default=3.0,
-        help="Single-sample reference WTIR; fixed at 3.0 by default.",
+        "--reference-wtir", type=float, default=None,
+        help="Optional explicit WTIR; omitted = technology-specific reference WTIR.",
     )
     parser.add_argument(
         "--fx-training-epr-factors", type=float, nargs="+",

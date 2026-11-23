@@ -2,7 +2,7 @@
 
 Declare the technologies and experiments below, then run from the repository root:
 
-    pixi run python -m scripts.experiments.generate_cost_rate_parquet
+    pixi run python -m scripts.generate_costs_parquet --output outputs/cost_rate_samples/WTIR3/uhs_cost_rates.parquet --reference-wtir 3
 
 Each row represents one CEM technology instance. Filter by ``experiment_id``
 and ``technology`` to load a scenario. The tables contain TCR, FOM, VOM,
@@ -27,6 +27,7 @@ Requires pandas, scipy and a Parquet engine (pyarrow): ``pixi add pyarrow`` if n
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,13 +64,13 @@ from scripts.experiments.cost_rates import (
 from scripts.experiments.linearisation_sensitivity import (
     construct_project,
 )
+from scripts.experiments.reference_provenance import write_reference_manifest
 
 
 # -----------------------------------------------------------------------------
 # Edit these settings to define the CEM experiment catalogue.
 # -----------------------------------------------------------------------------
 
-OUTPUT_FILE = Path("outputs/cost_rate_samples/uhs_cost_rates.parquet")
 EXPORT_SIGNIFICANT_DIGITS = 6
 
 TECHNOLOGIES = (
@@ -322,7 +323,8 @@ def sample_record(experiment_id: str, sample: SampledCostSet) -> dict:
     }
 
 
-def build_experiment_table() -> pd.DataFrame:
+def build_experiment_table(*, reference_wtir: float | None = None,
+                           reference_epr_factor: float | None = None) -> tuple[pd.DataFrame, list[SampledCostSet]]:
     """Run all declared experiment/technology combinations once."""
 
     ids = [experiment.experiment_id for experiment in EXPERIMENTS]
@@ -332,6 +334,7 @@ def build_experiment_table() -> pd.DataFrame:
         raise ValueError("TECHNOLOGIES must list unique technologies.")
 
     records: list[dict] = []
+    all_samples: list[SampledCostSet] = []
     for experiment in EXPERIMENTS:
         for technology in TECHNOLOGIES:
             config = SamplingConfig(
@@ -341,9 +344,10 @@ def build_experiment_table() -> pd.DataFrame:
                 n_wtir=experiment.n_wtir,
                 epr_factor_range=experiment.epr_factor_range,
                 wtir_range=experiment.wtir_range,
-                # Calibration reference remains technology-specific EPR and
-                epr_factor_override=1.0,
-                wtir_override=3.0,
+                # No implicit numerical WTIR/EPR. Technology files are the
+                # authority unless this scenario explicitly overrides them.
+                epr_factor_override=reference_epr_factor,
+                wtir_override=reference_wtir,
                 # Exactly one FX coefficient set, trained on 7 x 10 designs.
                 fx_training_epr_factors=(
                     STUDY_EPR_FACTOR_TRAINING
@@ -360,17 +364,37 @@ def build_experiment_table() -> pd.DataFrame:
             if len(samples) != experiment.n_epr * experiment.n_wtir:
                 raise RuntimeError(f"Unexpected sample count for {technology}/{experiment.experiment_id}")
             records.extend(sample_record(experiment.experiment_id, sample) for sample in samples)
+            all_samples.extend(samples)
             print(f"{experiment.experiment_id:>4} | {technology:<20} | {len(samples):>3} samples")
 
     table = pd.DataFrame.from_records(records)
     if table["instance_id"].duplicated().any():
         raise ValueError("Duplicate instance IDs; check the experiment catalogue.")
-    return table
+    return table, all_samples
 
 
 def main() -> None:
-    table = build_experiment_table()
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description="Export UHS costs with reproducible reference provenance")
+    parser.add_argument("--output", type=Path, required=True,
+                        help="Explicit scenario-specific output .parquet; existing outputs are not overwritten")
+    parser.add_argument("--reference-wtir", type=float, default=None,
+                        help="Explicit override; omitted = technology design REFERENCE_WTIR")
+    parser.add_argument("--reference-epr-factor", type=float, default=None,
+                        help="Explicit override; omitted = technology design REFERENCE_EPR_DAYS")
+    args = parser.parse_args()
+    output_file = args.output
+    if output_file.suffix != ".parquet":
+        parser.error("--output must end in .parquet")
+    csv_file = output_file.with_suffix(".csv")
+    manifest_file = output_file.with_suffix(".reference.json")
+    for target in (output_file, csv_file):
+        if target.exists():
+            raise FileExistsError(f"Refusing to overwrite historical cost data: {target}")
+    table, all_samples = build_experiment_table(
+        reference_wtir=args.reference_wtir, reference_epr_factor=args.reference_epr_factor
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    write_reference_manifest(Path(__file__).resolve().parents[1], all_samples, manifest_file)
 
     # Six significant digits remove floating-point tails while retaining
     # numeric values (not strings) in the Parquet. Change this one constant
@@ -385,20 +409,20 @@ def main() -> None:
         )
 
     try:
-        export_table.to_parquet(OUTPUT_FILE, engine="pyarrow", index=False)
+        export_table.to_parquet(output_file, engine="pyarrow", index=False)
     except ImportError as exc:
         raise RuntimeError(
             "Parquet export requires pyarrow in your Pixi environment. "
             "Run `pixi add pyarrow` and retry."
         ) from exc
-    csv_file = OUTPUT_FILE.with_suffix(".csv")
     export_table.to_csv(
         csv_file,
         index=False,
         float_format=f"%.{EXPORT_SIGNIFICANT_DIGITS}g",
     )
-    print(f"Saved {len(export_table)} CEM technology instances to {OUTPUT_FILE}")
+    print(f"Saved {len(export_table)} CEM technology instances to {output_file}")
     print(f"Saved inspection CSV to {csv_file}")
+    print(f"Saved reference provenance to {manifest_file}")
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ ASSUMPTIONS =  construct_hystories_design_assumptions(
 REFERENCE_SITE = "Sabbioncello"
 REFERENCE_CAPACITY_GWH_LHV = 2336.66
 REFERENCE_EPR_DAYS = 66.0
-REFERENCE_WTIR = 3
+REFERENCE_WTIR = 2
 
 # ----------------------------------------------------------------------------------------------------
 #

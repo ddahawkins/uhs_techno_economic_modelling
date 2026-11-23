@@ -185,7 +185,7 @@ RESERVOIR_SAMPLE_SORT: Literal["input", "Site", "storage_tcr"] = "input"
 SELECTED_ECONOMIC_MEDOIDS = {
     "depleted_gas_field": "Sabbioncello",
     "aquifer": "Gournay Sur Aronde",
-    "salt_cavern": "Manosque",
+    "salt_cavern": "Xanten",
     "lined_rock_cavern": "Skallen",
 }
 
@@ -324,7 +324,7 @@ class TechnologySpec:
 
     default_storage_capacity_gwh_lhv: float
     default_epr_days: float
-    default_wtir: float = 2.5
+    default_wtir: float = 2
 
 
 TECHNOLOGIES: tuple[TechnologySpec, ...] = (
