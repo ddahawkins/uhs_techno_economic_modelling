@@ -550,6 +550,40 @@ def extract_cem_rates(
     )
 
 
+def validate_exported_cost_rates(
+    tcr_rates: CapacityRates,
+    fom_rates: CapacityRates,
+    vom_rates: ThroughputRates,
+    *,
+    technology: str,
+    sample_id: str,
+) -> None:
+    """Fail on any negative or non-finite rate that would enter the CEM.
+
+    Negative *intermediate* source-fit slopes are permitted: only their sum,
+    aggregated by destination capacity driver and cost category, is exported.
+    """
+    rates = {
+        "TCR_storage_EUR_per_kWh": tcr_rates.storage,
+        "TCR_injection_EUR_per_kW": tcr_rates.injection,
+        "TCR_withdrawal_EUR_per_kW": tcr_rates.withdrawal,
+        "FOM_storage_EUR_per_kWh_year": fom_rates.storage,
+        "FOM_injection_EUR_per_kW_year": fom_rates.injection,
+        "FOM_withdrawal_EUR_per_kW_year": fom_rates.withdrawal,
+        "VOM_injection_EUR_per_kWh": vom_rates.injection,
+        "VOM_withdrawal_EUR_per_kWh": vom_rates.withdrawal,
+    }
+    invalid = {name: float(value) for name, value in rates.items()
+               if not isfinite(value) or value < 0.0}
+    if invalid:
+        raise ValueError(
+            f"Invalid exported CEM cost rates for {technology}, "
+            f"sample {sample_id}: {invalid}. "
+            "Negative intermediate source-fit slopes are permitted, "
+            "but negative or non-finite exported rates are not."
+        )
+
+
 # =============================================================================
 # Unanchored, interval-specific cross-driver representation
 # =============================================================================
@@ -764,17 +798,10 @@ def cross_driver_cost_mapping(
                 third_driver=third,
             )
 
-            # Do not permit negative source-stage slopes to be hidden by the
-            # aggregation into otherwise-positive CEM capacity coefficients.
-            negatives = {driver.value: rate for driver, rate in rates.items() if rate < 0.0}
-            if negatives:
-                raise ValueError(
-                    f"Negative FX three-driver coefficient(s) for {spec.technology}, "
-                    f"{typ.value}/{source.value}, EPR factors "
-                    f"[{epr_factor_interval.lower:g}, {epr_factor_interval.upper:g}], "
-                    f"WTIR [{wtir_interval.lower:g}, {wtir_interval.upper:g}]: "
-                    f"{negatives}. No cost rates will be exported."
-                )
+            # A source-fit slope can be negative for a physical reason (e.g.
+            # faster injection reduces aquifer first-fill CAPEX). Keep these
+            # signed contributions intact; validate the aggregated TCR, FOM,
+            # and VOM rates before any samples can be exported.
 
             for driver, rate in rates.items():
                 coefficients[typ][driver] += rate
@@ -935,6 +962,12 @@ def generate_cost_samples(
             capacities,
         )
 
+        validate_exported_cost_rates(
+            tcr_rates, fom_rates, vom_rates,
+            technology=spec.technology,
+            sample_id=f"{method.value}__epr{i:02d}_wtir{j:02d}",
+        )
+
         # Direct reallocation preserves the detailed investment total at
         # the centre. An unanchored cross-driver fit is allowed to differ.
         original_tcr = sum(
@@ -963,20 +996,6 @@ def generate_cost_samples(
         ):
             raise AssertionError(
                 "Direct CEM reallocation failed to preserve sample-centre TCR."
-            )
-
-        # Negative total capacity coefficients can be problematic in a
-        # continuously expandable LP. Flag them rather than exporting
-        # a potentially unbounded cost representation.
-        if min(
-            tcr_rates.storage,
-            tcr_rates.injection,
-            tcr_rates.withdrawal,
-        ) < -1e-9:
-            raise ValueError(
-                f"Negative fitted TCR coefficient for "
-                f"{spec.technology}, sample ({i}, {j}). "
-                "Inspect the local fit or narrow the sample interval."
             )
 
         sample = SampledCostSet(

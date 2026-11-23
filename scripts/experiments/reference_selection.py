@@ -2,6 +2,13 @@
 
 Run from repository root:
     pixi run python scripts/experiments/reference_selection.py
+    pixi run python scripts/experiments/reference_selection.py --reference-grid
+
+The optional --reference-grid mode reselects the *economic* medoid for every
+EPR-factor x WTIR combination (defaults: 0.5, 1, 1.5, 2 x integers 1..10).
+It writes a long-form audit and one CSV selection grid per technology. Each
+cell contains the selected observed site's name and source country. The
+geological/design medoid is reported but is invariant to EPR and WTIR.
 
 Each site's cost model uses its own H2 reference working capacity from the
 input CSV; only EPR and WTIR are held fixed within a technology class.
@@ -40,10 +47,11 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
               "Abandonment pressure bar", "Minimum pressure bar",
               "Min. Op. Pressure", "Maximum pressure bar", "Notes and sources")
 
-# Only EPR (days) and WTIR (withdrawal/injection ratio) are fixed. Each site's
-# capacity E comes from its "H2 reference working GWh" CSV field.
-REFERENCE_RATIOS = {"DGF": (66., 2), "SA": (66., 2),
-                    "SC": (12., 2), "LRC": (7.5, 2)}
+# Reference EPR (days) and WTIR are read from the technology-specific design
+# modules by load_models(); there are no local numerical reference defaults.
+# Each site's energy still comes from its "H2 reference working GWh" CSV field.
+GRID_EPR_FACTORS = (0.5, 1.0, 1.5, 2.0)
+GRID_WTIR_VALUES = tuple(float(x) for x in range(1, 11))
 CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
 DESIGN_RANGES = {
     "DGF": ((33., 66., 100.), (1., 2., 3.)),
@@ -258,8 +266,12 @@ def write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> Non
         writer.writerows(rows)
 
 
-def load_models() -> dict[str, tuple[Any, Any, Any]]:
+def load_models() -> dict[str, Any]:
     """Load the current package without importing either superseded script."""
+    from uhs_costs.design import aquifer as sa_design
+    from uhs_costs.design import depleted_gas_field as dgf_design
+    from uhs_costs.design import lined_rock_cavern as lrc_design
+    from uhs_costs.design import salt_cavern as sc_design
     from uhs_costs.design.aquifer import ASSUMPTIONS as sa_ass, construct_project as sa_build
     from uhs_costs.design.depleted_gas_field import ASSUMPTIONS as dgf_ass, construct_project as dgf_build
     from uhs_costs.design.lined_rock_cavern import ASSUMPTIONS as lrc_ass, construct_project as lrc_build
@@ -269,12 +281,25 @@ def load_models() -> dict[str, tuple[Any, Any, Any]]:
     from uhs_costs.cost_model.lined_rock_cavern import calculate_lined_rock_cavern_cost_components as lrc_cost
     from uhs_costs.cost_model.salt_cavern import calculate_salt_cavern_cost_components as sc_cost
     from uhs_costs.design.default_design_assumptions import calculate_temperature_from_depth_k
+    design_modules = {"DGF": dgf_design, "SA": sa_design,
+                      "SC": sc_design, "LRC": lrc_design}
+    reference_ratios = {}
+    for cls, module in design_modules.items():
+        # Missing/invalid reference definitions are configuration errors;
+        # never substitute a hardcoded study-wide EPR or WTIR.
+        epr_days = float(module.REFERENCE_EPR_DAYS)
+        wtir = float(module.REFERENCE_WTIR)
+        if not (math.isfinite(epr_days) and epr_days > 0
+                and math.isfinite(wtir) and wtir > 0):
+            raise ValueError(f"Invalid design-file EPR/WTIR for {cls}")
+        reference_ratios[cls] = (epr_days, wtir)
     return {
         "DGF": (dgf_ass, dgf_build, dgf_cost),
         "SA": (sa_ass, sa_build, sa_cost),
         "SC": (sc_ass, sc_build, sc_cost),
         "LRC": (lrc_ass, lrc_build, lrc_cost),
         "temperature_fn": calculate_temperature_from_depth_k,
+        "reference_ratios": reference_ratios,
     }
 
 
@@ -393,12 +418,12 @@ def model_costs(site: Site, models: dict, facility: tuple[float, float, float]) 
     return component_rates(result)
 
 
-def reference_facility(site: Site) -> tuple[float, float, float]:
-    """Use the site's CSV working capacity with class-fixed EPR and WTIR."""
+def reference_facility(site: Site, models: dict) -> tuple[float, float, float]:
+    """Use CSV working capacity with authoritative design-file EPR and WTIR."""
     if (site.h2_reference_gwh is None or not math.isfinite(site.h2_reference_gwh)
             or site.h2_reference_gwh <= 0):
         raise ValueError(f"Missing/invalid H2 working capacity: {site.cls}/{site.name}")
-    return (site.h2_reference_gwh, *REFERENCE_RATIOS[site.cls])
+    return (site.h2_reference_gwh, *models["reference_ratios"][site.cls])
 
 
 def weighted_median(values: list[float], weights: list[float]) -> float:
@@ -592,7 +617,7 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
     rates: list[dict[str, float]] = []
     for site in selected:
         try:
-            result = model_costs(site, models, reference_facility(site))
+            result = model_costs(site, models, reference_facility(site, models))
         except Exception as exc:
             quality[site.row_index]["status"] = "model_failure"
             quality[site.row_index]["reason"] = f"{type(exc).__name__}: {exc}"
@@ -611,8 +636,8 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
         "minimum_pressure_basis": min_pressure_source,
         "min_E_gwh": min((s.h2_reference_gwh for s in successful), default=None),
         "max_E_gwh": max((s.h2_reference_gwh for s in successful), default=None),
-        "EPR_days": REFERENCE_RATIOS[cls][0],
-        "WTIR": REFERENCE_RATIOS[cls][1],
+        "EPR_days": models["reference_ratios"][cls][0],
+        "WTIR": models["reference_ratios"][cls][1],
         "status": "underpowered" if n_groups < min_sites else "ok",
     }
     if n_groups < min_sites:
@@ -634,15 +659,15 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
     )
     try:
         synthetic_rates = model_costs(synthetic_site, models,
-                                      reference_facility(synthetic_site))
+                                      reference_facility(synthetic_site, models))
     except Exception as exc:
         raise RuntimeError(
             f"Synthetic {cls} arithmetic-mean design could not be costed: "
             f"{type(exc).__name__}: {exc}; source counts={mean_counts}"
         ) from exc
     synthetic = {**site_fields(synthetic_site), **synthetic_rates,
-                 "EPR_days": REFERENCE_RATIOS[cls][0],
-                 "WTIR": REFERENCE_RATIOS[cls][1],
+                 "EPR_days": models["reference_ratios"][cls][0],
+                 "WTIR": models["reference_ratios"][cls][1],
                  **{f"n_source_{field}": count
                     for field, count in mean_counts.items()}}
     rows = []
@@ -697,7 +722,7 @@ def sweep_design(cls: str, medoids: list[Site], models: dict,
     result = []
     for parameter_index, parameter in enumerate(("E_gwh", "EPR_days", "WTIR")):
         for role, site in zip(("design_medoid", "economic_medoid"), medoids):
-            baseline = reference_facility(site)
+            baseline = reference_facility(site, models)
             if parameter_index == 0:
                 low = baseline[0] * CAPACITY_SWEEP_FACTORS[0]
                 ref = baseline[0]
@@ -730,6 +755,188 @@ def sweep_design(cls: str, medoids: list[Site], models: dict,
                     record["error"] = f"{type(exc).__name__}: {exc}"
                 result.append(record)
     return result
+
+
+def reference_grid_sweep(
+    classes: list[str],
+    sites: list[Site],
+    models: dict,
+    quality: dict[int, dict],
+    min_sites: int,
+    epr_factors: tuple[float, ...],
+    wtir_values: tuple[float, ...],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rerank observed economic medoids on a common EPR/WTIR grid.
+
+    The established economic-medoid criterion is unchanged: weighted mean
+    Euclidean distance between log CAPEX+ABEX component-rate vectors, with
+    IQR normalization and one total vote per distinct facility. Each site's
+    *own* documented reference working capacity is kept fixed throughout.
+    No synthetic sites or per-country candidate restrictions are introduced.
+
+    Failure of a candidate at a grid point is recorded explicitly. A selection
+    from the surviving candidates is marked partial; by default main() then
+    raises, so a changing candidate pool cannot silently alter the ranking.
+    """
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for cls in classes:
+        candidates = [s for s in sites
+                      if s.cls == cls and not quality[s.row_index]["reason"]]
+        eligible_facilities = len({group_key(s) for s in candidates})
+        design_medoid = None
+        if candidates and eligible_facilities >= min_sites:
+            design_medoid = candidates[
+                medoid_ranking([s.vector() for s in candidates],
+                               site_weights(candidates))[0][1]
+            ]
+
+        for factor in epr_factors:
+            epr_days = models["reference_ratios"][cls][0] * factor
+            for wtir in wtir_values:
+                valid_sites: list[Site] = []
+                cost_vectors: list[tuple[float, float, float]] = []
+                failed_count = 0
+                for site in candidates:
+                    # Preserve each site's own working energy, as in the
+                    # original single-reference analysis.
+                    facility = (site.h2_reference_gwh, epr_days, wtir)
+                    try:
+                        rates = model_costs(site, models, facility)
+                    except Exception as exc:
+                        failed_count += 1
+                        failures.append({
+                            "storage_class": cls, "technology": TECHS[cls],
+                            "EPR_factor": factor, "EPR_days": epr_days,
+                            "WTIR": wtir, "site": site.name,
+                            "country": site.country, "csv_row": site.row_index,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        })
+                    else:
+                        valid_sites.append(site)
+                        cost_vectors.append(tuple(rates[c] for c in COSTS))
+
+                distinct_valid = len({group_key(s) for s in valid_sites})
+                record: dict[str, Any] = {
+                    "storage_class": cls, "technology": TECHS[cls],
+                    "EPR_factor": factor, "EPR_days": epr_days,
+                    "WTIR": wtir, "n_eligible_candidates": len(candidates),
+                    "n_eligible_facilities": eligible_facilities,
+                    "n_successful_candidates": len(valid_sites),
+                    "n_successful_facilities": distinct_valid,
+                    "n_model_failures": failed_count,
+                    "design_medoid_site": (
+                        design_medoid.name if design_medoid else ""),
+                    "design_medoid_country": (
+                        design_medoid.country if design_medoid else ""),
+                    "economic_medoid_site": "", "economic_medoid_country": "",
+                    "economic_medoid_csv_row": "", "economic_medoid_score": "",
+                    "runner_up_site": "", "runner_up_country": "",
+                    "runner_up_gap_pct": "",
+                    "status": "underpowered",
+                }
+                if distinct_valid >= min_sites:
+                    ranking = medoid_ranking(cost_vectors, site_weights(valid_sites))
+                    best_score, best_index = ranking[0]
+                    winner = valid_sites[best_index]
+                    record.update({
+                        "economic_medoid_site": winner.name,
+                        "economic_medoid_country": winner.country,
+                        "economic_medoid_csv_row": winner.row_index,
+                        "economic_medoid_score": best_score,
+                        "status": "partial_model_failure" if failed_count else "ok",
+                    })
+                    # Runner-up must be a *different physical facility*;
+                    # duplicated CSV records must not masquerade as a second site.
+                    runner_up = next(
+                        ((score, valid_sites[i]) for score, i in ranking[1:]
+                         if group_key(valid_sites[i]) != group_key(winner)), None
+                    )
+                    if runner_up is not None:
+                        score, site = runner_up
+                        record["runner_up_site"] = site.name
+                        record["runner_up_country"] = site.country
+                        record["runner_up_gap_pct"] = (
+                            100 * (score / best_score - 1)
+                            if best_score else 0.0
+                        )
+                results.append(record)
+    return results, failures
+
+
+def write_reference_grids(
+    directory: Path,
+    classes: list[str],
+    records: list[dict[str, Any]],
+    epr_factors: tuple[float, ...],
+    wtir_values: tuple[float, ...],
+) -> None:
+    """Export auditable long-form results and readable 4 x 10 site grids."""
+    detail_columns = [
+        "storage_class", "technology", "EPR_factor", "EPR_days", "WTIR",
+        "n_eligible_candidates", "n_eligible_facilities",
+        "n_successful_candidates", "n_successful_facilities", "n_model_failures",
+        "design_medoid_site", "design_medoid_country",
+        "economic_medoid_site", "economic_medoid_country",
+        "economic_medoid_csv_row", "economic_medoid_score",
+        "runner_up_site", "runner_up_country", "runner_up_gap_pct", "status",
+    ]
+    write_csv(directory / "reference_grid_details.csv", records, detail_columns)
+
+    by_cell = {(r["storage_class"], r["EPR_factor"], r["WTIR"]): r
+               for r in records}
+    wtir_columns = [f"WTIR_{v:g}" for v in wtir_values]
+    combined_rows = []
+    summary_rows = []
+    for cls in classes:
+        site_rows = []
+        country_rows = []
+        class_records = [r for r in records if r["storage_class"] == cls]
+        for factor in epr_factors:
+            first = by_cell[(cls, factor, wtir_values[0])]
+            site_row = {"storage_class": cls, "EPR_factor": factor,
+                        "EPR_days": first["EPR_days"]}
+            country_row = dict(site_row)
+            for wtir, column in zip(wtir_values, wtir_columns):
+                selection = by_cell[(cls, factor, wtir)]
+                site = selection["economic_medoid_site"]
+                country = selection["economic_medoid_country"]
+                flag = " [PARTIAL]" if selection["status"] == "partial_model_failure" else ""
+                if site:
+                    site_row[column] = f"{site} ({country}){flag}"
+                    country_row[column] = f"{country}{flag}"
+                else:
+                    site_row[column] = f"[{selection['status'].upper()}]"
+                    country_row[column] = f"[{selection['status'].upper()}]"
+            site_rows.append(site_row)
+            country_rows.append(country_row)
+            combined_rows.append(site_row)
+        columns = ["storage_class", "EPR_factor", "EPR_days", *wtir_columns]
+        write_csv(directory / f"reference_grid_{cls}.csv", site_rows, columns)
+        write_csv(directory / f"reference_grid_{cls}_countries.csv",
+                  country_rows, columns)
+        selected = sorted({f"{r['economic_medoid_site']} ({r['economic_medoid_country']})"
+                           for r in class_records if r["economic_medoid_site"]})
+        summary_rows.append({
+            "storage_class": cls, "technology": TECHS[cls],
+            "n_grid_cells": len(class_records),
+            "n_complete_cells": sum(r["status"] == "ok" for r in class_records),
+            "n_partial_cells": sum(r["status"] == "partial_model_failure"
+                                   for r in class_records),
+            "n_underpowered_cells": sum(r["status"] == "underpowered"
+                                        for r in class_records),
+            "n_distinct_selected_references": len(selected),
+            "selected_references": " | ".join(selected),
+            "design_medoid_site": class_records[0]["design_medoid_site"],
+            "design_medoid_country": class_records[0]["design_medoid_country"],
+        })
+    write_csv(directory / "reference_grid_all.csv", combined_rows,
+              ["storage_class", "EPR_factor", "EPR_days", *wtir_columns])
+    write_csv(directory / "reference_grid_summary.csv", summary_rows,
+              ["storage_class", "technology", "n_grid_cells", "n_complete_cells",
+               "n_partial_cells", "n_underpowered_cells",
+               "n_distinct_selected_references", "selected_references",
+               "design_medoid_site", "design_medoid_country"])
 
 
 def plot_cost_distribution(cls: str, rows: list[dict[str, Any]],
@@ -806,7 +1013,8 @@ def main() -> None:
     parser.add_argument("--input", type=Path,
                         default=Path("data/resources/uhs_reference_sites.csv"))
     parser.add_argument("--output-dir", type=Path,
-                        default=Path("outputs/reference_selection"))
+                        default=None,
+                        help="Output directory (default: outputs/reference_selection, or outputs/reference_selection_grid for --reference-grid)")
     parser.add_argument("--classes", nargs="+", choices=CLASSES,
                         default=list(CLASSES))
     parser.add_argument("--min-sites", type=int, default=3,
@@ -818,6 +1026,14 @@ def main() -> None:
                         help="Minimum pressure basis: raw reported field (default), or earlier Min. Op. Pressure with raw fallback")
     parser.add_argument("--require-raw-pmin", action="store_true",
                         help="Exclude rows with no explicit reported minimum pressure, including in operating mode")
+    parser.add_argument("--reference-grid", action="store_true",
+                        help="Sweep economic reference selection over the EPR x WTIR grid instead of the existing single-reference analysis")
+    parser.add_argument("--grid-epr-factors", type=float, nargs="+",
+                        default=list(GRID_EPR_FACTORS), metavar="FACTOR",
+                        help="EPR multipliers for reference grid (default: 0.5 1 1.5 2)")
+    parser.add_argument("--grid-wtir-values", type=float, nargs="+",
+                        default=list(GRID_WTIR_VALUES), metavar="WTIR",
+                        help="WTIR values for reference grid (default: integers 1..10)")
     parser.add_argument("--sweep-points", type=int, default=9)
     parser.add_argument("--validate-only", action="store_true",
                         help="Validate and tabulate CSV without importing uhs_costs")
@@ -827,8 +1043,20 @@ def main() -> None:
     parser.add_argument("--allow-model-failures", action="store_true",
                         help="Write partial results without nonzero exit for failed model runs")
     args = parser.parse_args()
+    if args.output_dir is None:
+        args.output_dir = Path(
+            "outputs/reference_selection_grid" if args.reference_grid
+            else "outputs/reference_selection"
+        )
     if args.min_sites < 3 or args.sweep_points < 3 or args.min_lrc_cavern_m3 <= 0:
         parser.error("Need min-sites >=3, sweep-points >=3, LRC cavern threshold >0")
+    for label, values in (("EPR factors", args.grid_epr_factors),
+                          ("WTIR values", args.grid_wtir_values)):
+        if (not values or any(not math.isfinite(v) or v <= 0 for v in values)
+                or len(set(values)) != len(values)):
+            parser.error(f"{label} must be positive, finite and distinct")
+    epr_factors = tuple(sorted(args.grid_epr_factors))
+    wtir_values = tuple(sorted(args.grid_wtir_values))
     sites = [s for s in read_sites(args.input, args.min_pressure_source)
              if s.cls in args.classes]
     if not sites:
@@ -849,6 +1077,53 @@ def main() -> None:
         all_count = sum(s.cls == cls for s in sites)
         complete = sum(s.cls == cls and not quality[s.row_index]["reason"] for s in sites)
         print(f"  {cls}: {complete}/{all_count} complete capacity/geology configurations")
+
+    if args.reference_grid:
+        quality_rows = [quality[s.row_index] for s in sites]
+        write_csv(args.output_dir / "candidate_quality.csv", quality_rows,
+                  list(quality_rows[0]))
+        if args.validate_only:
+            print("CSV-only validation complete; reference grid not evaluated.")
+            return
+        models = load_models()
+        records, failures = reference_grid_sweep(
+            args.classes, sites, models, quality, args.min_sites,
+            epr_factors, wtir_values,
+        )
+        write_reference_grids(
+            args.output_dir, args.classes, records, epr_factors, wtir_values
+        )
+        failure_columns = ["storage_class", "technology", "EPR_factor",
+                           "EPR_days", "WTIR", "site", "country", "csv_row",
+                           "error"]
+        write_csv(args.output_dir / "reference_grid_model_failures.csv",
+                  failures, failure_columns)
+        for cls in args.classes:
+            relevant = [r for r in records if r["storage_class"] == cls]
+            selected = sorted({(r["economic_medoid_site"], r["economic_medoid_country"])
+                               for r in relevant if r["economic_medoid_site"]})
+            print(f"  {cls}: {len(relevant)} EPR/WTIR cells; "
+                  f"{len(selected)} distinct economic references: "
+                  + (", ".join(f"{site} ({country})" for site, country in selected)
+                     or "none"))
+        incomplete = [r for r in records if r["status"] == "underpowered"]
+        print(f"Saved reference grids and diagnostics: {args.output_dir}")
+        if failures:
+            print(f"WARNING: {len(failures)} model failures; "
+                  "some grids may use different candidate pools")
+        if incomplete:
+            print(f"WARNING: {len(incomplete)} underpowered cells")
+        if failures and not args.allow_model_failures:
+            raise RuntimeError(
+                "Reference-grid model failures; inspect reference_grid_model_failures.csv "
+                "or use --allow-model-failures for an explicitly partial result"
+            )
+        if incomplete and not args.allow_underpowered:
+            raise RuntimeError(
+                "Reference-grid cells lack sufficient distinct costed facilities; "
+                "inspect reference_grid_details.csv or use --allow-underpowered"
+            )
+        return
 
     summaries: list[dict] = []
     ranked: list[dict] = []
