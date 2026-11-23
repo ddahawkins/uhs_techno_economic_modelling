@@ -96,7 +96,7 @@ class CostMethod(StrEnum):
 # The ranges below describe the single-sample FX evaluation domain, NOT a
 # physical feasibility envelope for individual UHS facilities. Reference
 # designs remain fixed at their technology-specific EPR and WTIR.
-STUDY_EPR_FACTOR_RANGE = (0.5, 2.0)
+STUDY_EPR_FACTOR_RANGE = (0.25, 4.0)
 STUDY_WTIR_RANGE = (1.0, 10.0)
 STUDY_EPR_FACTOR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_EPR_FACTOR_RANGE[0], STUDY_EPR_FACTOR_RANGE[-1], 10)]))
 STUDY_WTIR_TRAINING = tuple(np.unique(np.r_[np.linspace(STUDY_WTIR_RANGE[0], STUDY_WTIR_RANGE[-1], 10)]))

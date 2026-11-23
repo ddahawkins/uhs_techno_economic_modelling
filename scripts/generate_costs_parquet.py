@@ -28,6 +28,8 @@ Requires pandas, scipy and a Parquet engine (pyarrow): ``pixi add pyarrow`` if n
 from __future__ import annotations
 
 import argparse
+import importlib
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -324,8 +326,27 @@ def sample_record(experiment_id: str, sample: SampledCostSet) -> dict:
 
 
 def build_experiment_table(*, reference_wtir: float | None = None,
-                           reference_epr_factor: float | None = None) -> tuple[pd.DataFrame, list[SampledCostSet]]:
+                           reference_epr_factor: float | None = None,
+                           epr_factor_range: tuple[float, float] = STUDY_EPR_FACTOR_RANGE,
+                           wtir_range: tuple[float, float] = STUDY_WTIR_RANGE,
+                           fx_training_epr_points: int = len(STUDY_EPR_FACTOR_TRAINING),
+                           fx_training_wtir_points: int = len(STUDY_WTIR_TRAINING),
+                           ) -> tuple[pd.DataFrame, list[SampledCostSet]]:
     """Run all declared experiment/technology combinations once."""
+
+    for name, bounds in (("EPR factor", epr_factor_range), ("WTIR", wtir_range)):
+        if not all(math.isfinite(v) for v in bounds) or not 0 < bounds[0] < bounds[1]:
+            raise ValueError(f"Invalid {name} domain: {bounds}")
+    for name, count in (("EPR", fx_training_epr_points), ("WTIR", fx_training_wtir_points)):
+        if count < 2:
+            raise ValueError(f"FX training needs at least two {name} points")
+
+    def grid(bounds: tuple[float, float], count: int) -> tuple[float, ...]:
+        return tuple(bounds[0] + (bounds[1] - bounds[0]) * i / (count - 1)
+                     for i in range(count))
+
+    epr_training = grid(epr_factor_range, fx_training_epr_points)
+    wtir_training = grid(wtir_range, fx_training_wtir_points)
 
     ids = [experiment.experiment_id for experiment in EXPERIMENTS]
     if not ids or any(not name.strip() for name in ids) or len(ids) != len(set(ids)):
@@ -342,20 +363,20 @@ def build_experiment_table(*, reference_wtir: float | None = None,
                 method=experiment.method,
                 n_epr=experiment.n_epr,
                 n_wtir=experiment.n_wtir,
-                epr_factor_range=experiment.epr_factor_range,
-                wtir_range=experiment.wtir_range,
+                epr_factor_range=epr_factor_range,
+                wtir_range=wtir_range,
                 # No implicit numerical WTIR/EPR. Technology files are the
                 # authority unless this scenario explicitly overrides them.
                 epr_factor_override=reference_epr_factor,
                 wtir_override=reference_wtir,
-                # Exactly one FX coefficient set, trained on 7 x 10 designs.
+                # One global FX coefficient set over the declared domain.
                 fx_training_epr_factors=(
-                    STUDY_EPR_FACTOR_TRAINING
+                    epr_training
                     if experiment.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
                     else None
                 ),
                 fx_training_wtir_values=(
-                    STUDY_WTIR_TRAINING
+                    wtir_training
                     if experiment.method == CostMethod.FULLY_DECOUPLED_CROSS_DRIVER.value
                     else None
                 ),
@@ -373,6 +394,32 @@ def build_experiment_table(*, reference_wtir: float | None = None,
     return table, all_samples
 
 
+def verify_reference_expectations(*, expected_salt_cavern_site: str | None,
+                                  expected_wtir: float | None,
+                                  reference_wtir: float | None) -> None:
+    """Fail early if the active design files do not match the named scenario."""
+    if expected_salt_cavern_site is not None:
+        spec = get_technology("salt_cavern")
+        module = importlib.import_module(spec.project_constructor.__module__)
+        actual_site = getattr(module, "REFERENCE_SITE", None)
+        if actual_site != expected_salt_cavern_site:
+            raise ValueError(
+                f"Salt cavern reference site is {actual_site!r}, "
+                f"expected {expected_salt_cavern_site!r}"
+            )
+    if expected_wtir is not None:
+        if not math.isfinite(expected_wtir) or expected_wtir <= 0:
+            raise ValueError("Expected reference WTIR must be positive and finite")
+        for technology in TECHNOLOGIES:
+            spec = get_technology(technology)
+            actual = reference_wtir if reference_wtir is not None else spec.default_wtir
+            if not math.isclose(float(actual), expected_wtir, rel_tol=1e-9):
+                raise ValueError(
+                    f"{technology} reference WTIR {actual} differs from "
+                    f"expected {expected_wtir}"
+                )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export UHS costs with reproducible reference provenance")
     parser.add_argument("--output", type=Path, required=True,
@@ -381,6 +428,22 @@ def main() -> None:
                         help="Explicit override; omitted = technology design REFERENCE_WTIR")
     parser.add_argument("--reference-epr-factor", type=float, default=None,
                         help="Explicit override; omitted = technology design REFERENCE_EPR_DAYS")
+    parser.add_argument("--epr-factor-min", type=float, default=STUDY_EPR_FACTOR_RANGE[0],
+                        help="Minimum fitted EPR factor, relative to the design-file reference")
+    parser.add_argument("--epr-factor-max", type=float, default=STUDY_EPR_FACTOR_RANGE[1],
+                        help="Maximum fitted EPR factor, relative to the design-file reference")
+    parser.add_argument("--wtir-min", type=float, default=STUDY_WTIR_RANGE[0],
+                        help="Minimum fitted WTIR ratio")
+    parser.add_argument("--wtir-max", type=float, default=STUDY_WTIR_RANGE[1],
+                        help="Maximum fitted WTIR ratio")
+    parser.add_argument("--fx-training-epr-points", type=int, default=len(STUDY_EPR_FACTOR_TRAINING),
+                        help="Number of inclusive EPR-factor training coordinates")
+    parser.add_argument("--fx-training-wtir-points", type=int, default=len(STUDY_WTIR_TRAINING),
+                        help="Number of inclusive WTIR training coordinates")
+    parser.add_argument("--expect-salt-cavern-site", type=str, default=None,
+                        help="Guard against accidentally using another geological reference site")
+    parser.add_argument("--expect-reference-wtir", type=float, default=None,
+                        help="Guard against unexpectedly changed physical WTIR assumptions")
     args = parser.parse_args()
     output_file = args.output
     if output_file.suffix != ".parquet":
@@ -390,8 +453,18 @@ def main() -> None:
     for target in (output_file, csv_file):
         if target.exists():
             raise FileExistsError(f"Refusing to overwrite historical cost data: {target}")
+    verify_reference_expectations(
+        expected_salt_cavern_site=args.expect_salt_cavern_site,
+        expected_wtir=args.expect_reference_wtir,
+        reference_wtir=args.reference_wtir,
+    )
     table, all_samples = build_experiment_table(
-        reference_wtir=args.reference_wtir, reference_epr_factor=args.reference_epr_factor
+        reference_wtir=args.reference_wtir,
+        reference_epr_factor=args.reference_epr_factor,
+        epr_factor_range=(args.epr_factor_min, args.epr_factor_max),
+        wtir_range=(args.wtir_min, args.wtir_max),
+        fx_training_epr_points=args.fx_training_epr_points,
+        fx_training_wtir_points=args.fx_training_wtir_points,
     )
     output_file.parent.mkdir(parents=True, exist_ok=True)
     write_reference_manifest(Path(__file__).resolve().parents[1], all_samples, manifest_file)

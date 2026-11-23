@@ -50,7 +50,7 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
 # Reference EPR (days) and WTIR are read from the technology-specific design
 # modules by load_models(); there are no local numerical reference defaults.
 # Each site's energy still comes from its "H2 reference working GWh" CSV field.
-GRID_EPR_FACTORS = (0.5, 1.0, 1.5, 2.0)
+GRID_EPR_FACTORS = (0.5, 1.0, 1.5, 2.0,2.5,3,3.5, 4)
 GRID_WTIR_VALUES = tuple(float(x) for x in range(1, 11))
 CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
 DESIGN_RANGES = {
