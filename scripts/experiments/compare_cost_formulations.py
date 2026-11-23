@@ -20,7 +20,7 @@ Example (run from the project root with the uhs_costs package installed):
 
 To test a single technology or reduce detailed-model evaluations:
 
-    pixi run python -m scripts.experiments.compare_cost_formulations \
+    pixi run python -m scripts.experiments.compare_cost_formulations `
         --technologies salt_cavern --grid-points 11 --slice-points 25
 """
 
@@ -67,7 +67,7 @@ FORMULATIONS = {
 
 # 190 mm wide: Elsevier two-column format. Font sizes remain legible at 100%.
 WIDTH_INCH = 190 / 25.4
-REFERENCE_WTIR = 3.0
+REFERENCE_WTIR = 2.0
 PLASMA = plt.get_cmap("plasma")
 FORMULATION_COLOURS = {
     "B": PLASMA(0.10),
@@ -274,12 +274,12 @@ def _plot_slices(technology, samples, analysis, output_dir: Path):
     axes[0].set_ylabel("Change in TCR relative to reference [%]")
     axes[0].set_xlim(*STUDY_EPR_FACTOR_RANGE)
     axes[1].set_xlim(*STUDY_WTIR_RANGE)
-    epr_ticks = np.arange(0.5, 1.501, 0.25)
+    epr_ticks = np.arange(0.25, 4.01, 0.5)
     axes[0].set_xticks([
         tick for tick in epr_ticks
         if STUDY_EPR_FACTOR_RANGE[0] <= tick <= STUDY_EPR_FACTOR_RANGE[1]
     ])
-    wtir_ticks = np.arange(1, 6)
+    wtir_ticks = np.arange(1, 10+1)
     axes[1].set_xticks([
         tick for tick in wtir_ticks
         if STUDY_WTIR_RANGE[0] <= tick <= STUDY_WTIR_RANGE[1]
