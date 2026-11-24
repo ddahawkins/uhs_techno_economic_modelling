@@ -2,7 +2,7 @@
 
 Declare the technologies and experiments below, then run from the repository root:
 
-    pixi run python -m scripts.generate_costs_parquet --output outputs/cost_rate_samples/WTIR3/uhs_cost_rates.parquet --reference-wtir 3
+    pixi run python -m scripts.generate_costs_parquet --output outputs/cost_rate_samples/Manosque_WTIR2_EPR025-4/uhs_cost_rates.parquet --reference-wtir 2
 
 Each row represents one CEM technology instance. Filter by ``experiment_id``
 and ``technology`` to load a scenario. The tables contain TCR, FOM, VOM,
