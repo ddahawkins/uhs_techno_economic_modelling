@@ -5,7 +5,8 @@ Run from repository root:
     pixi run python scripts/experiments/reference_selection.py --reference-grid
 
 The optional --reference-grid mode reselects the *economic* medoid for every
-EPR-factor x WTIR combination (defaults: 0.5, 1, 1.5, 2 x integers 1..10).
+EPR-factor x WTIR combination (defaults: factors 0.5..4 in steps of 0.5,
+and WTIR values 1..10).
 It writes a long-form audit and one CSV selection grid per technology. Each
 cell contains the selected observed site's name and source country. The
 geological/design medoid is reported but is invariant to EPR and WTIR.
@@ -14,6 +15,12 @@ Each site's cost model uses its own H2 reference working capacity from the
 input CSV; only EPR and WTIR are held fixed within a technology class.
 Design and economic medoids are observed cases, not synthetic
 averages. Site coverage is not an availability-weighted European asset census.
+Medoids minimise the mean distance to observed candidate sites, using simple
+mean-normalised Euclidean distances (each feature divided by its class mean).
+Duplicate records for the same physical site share one vote.
+In the standard (non-grid) mode, a separate one-at-a-time cost sensitivity
+varies the selected medoids' energy, EPR, and WTIR by factors of their actual
+design-file reference values; it does not reselect medoids.
 Missing capacities/pressures are never silently imputed; hydrogen volume
 equivalents from natural-gas working volume are not validated H2 capacities.
 By default, minimum pressures come from the reported source column. The
@@ -50,15 +57,14 @@ CSV_FIELDS = ("Storage class", "Site", "Country", "H2 reference working GWh",
 # Reference EPR (days) and WTIR are read from the technology-specific design
 # modules by load_models(); there are no local numerical reference defaults.
 # Each site's energy still comes from its "H2 reference working GWh" CSV field.
-GRID_EPR_FACTORS = (0.5, 1.0, 1.5, 2.0,2.5,3,3.5, 4)
+GRID_EPR_FACTORS = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
 GRID_WTIR_VALUES = tuple(float(x) for x in range(1, 11))
-CAPACITY_SWEEP_FACTORS = (0.5, 1.5)
-DESIGN_RANGES = {
-    "DGF": ((33., 66., 100.), (1., 2., 3.)),
-    "SA": ((33., 66., 100.), (1., 2., 3.)),
-    "SC": ((6., 12., 18.), (1., 2., 3.)),
-    "LRC": ((5., 7.5, 10.), (1., 2., 3.)),
-}
+# Standard-mode, one-at-a-time (OAT) cost diagnostics only. These ranges are
+# relative to each actual site/technology reference design, and never override
+# the EPR or WTIR stored in the technology-specific design module.
+OAT_CAPACITY_FACTOR_RANGE = (0.5, 1.5)
+OAT_EPR_FACTOR_RANGE = (0.5, 1.5)
+OAT_WTIR_FACTOR_RANGE = (0.5, 1.5)
 
 # Porous-media wellfield assumptions
 DEFAULT_PRODUCTION_WELLS = 24
@@ -488,10 +494,10 @@ def medoid_statistics(vectors: list[tuple[float, ...]], weights: list[float]
                       ) -> tuple[list[tuple[float, int]], list[tuple[float, ...]], tuple[float, ...]]:
     """Rank observed medoids and decompose each score across its coordinates.
 
-    Distances are Euclidean in IQR-normalised log coordinates. Normalisation
-    uses the same facility weights as the objective, including duplicated sites.
-    Each axis contributes (normalised difference)^2 / pairwise distance, so the
-    three economic contributions sum to the original total medoid score.
+    Distances are Euclidean after dividing each feature's pairwise difference
+    by its weighted arithmetic mean across the candidate sites. Facility
+    weights prevent duplicated records from counting as separate sites.
+    The per-axis contributions sum to the original total medoid score.
     """
     if not vectors or any(len(v) != len(vectors[0]) for v in vectors):
         raise ValueError("Inconsistent/empty medoid vectors")
@@ -499,22 +505,19 @@ def medoid_statistics(vectors: list[tuple[float, ...]], weights: list[float]
         raise ValueError("Invalid medoid weights")
     if any(x <= 0 or not math.isfinite(x) for v in vectors for x in v):
         raise ValueError("All medoid features must be finite and strictly positive")
-    log_v = [[math.log(x) for x in vector] for vector in vectors]
-    axes = list(zip(*log_v))
-    scales = []
-    for axis in axes:
-        iqr = (weighted_quantile(list(axis), weights, .75)
-               - weighted_quantile(list(axis), weights, .25))
-        scale = iqr or (max(axis) - min(axis)) or 1.
-        scales.append(scale)
     total_weight = sum(weights)
+    means = tuple(
+        sum(weight * row[k] for weight, row in zip(weights, vectors)) / total_weight
+        for k in range(len(vectors[0]))
+    )
     scores = []
     contributions = []
-    for i, row in enumerate(log_v):
+    for i, row in enumerate(vectors):
         score = 0.
         parts = [0.] * len(row)
-        for j, other in enumerate(log_v):
-            squared = [((a-b)/s)**2 for a, b, s in zip(row, other, scales)]
+        for j, other in enumerate(vectors):
+            squared = [((a - b) / mean) ** 2
+                       for a, b, mean in zip(row, other, means)]
             distance = math.sqrt(sum(squared))
             score += weights[j] * distance
             if distance:
@@ -523,7 +526,7 @@ def medoid_statistics(vectors: list[tuple[float, ...]], weights: list[float]
         scores.append((score / total_weight, i))
         contributions.append(tuple(component / total_weight for component in parts))
     return (sorted(scores, key=lambda item: (item[0], item[1])),
-            contributions, tuple(scales))
+            contributions, means)
 
 
 def medoid_ranking(vectors: list[tuple[float, ...]], weights: list[float]
@@ -718,17 +721,20 @@ def evaluate_class(cls: str, sites: list[Site], models: dict,
 def sweep_design(cls: str, medoids: list[Site], models: dict,
                  n_steps: int, quality: dict[int, dict]
                  ) -> list[dict[str, Any]]:
-    """OAT E/EPR/WTIR screens about each selected site's CSV working capacity."""
+    """OAT cost screens around each selected site's actual reference design.
+
+    EPR and WTIR are read from the technology design modules, never from a
+    second set of hardcoded technology-specific numerical reference values.
+    """
     result = []
+    factor_ranges = (OAT_CAPACITY_FACTOR_RANGE, OAT_EPR_FACTOR_RANGE,
+                     OAT_WTIR_FACTOR_RANGE)
     for parameter_index, parameter in enumerate(("E_gwh", "EPR_days", "WTIR")):
         for role, site in zip(("design_medoid", "economic_medoid"), medoids):
             baseline = reference_facility(site, models)
-            if parameter_index == 0:
-                low = baseline[0] * CAPACITY_SWEEP_FACTORS[0]
-                ref = baseline[0]
-                high = baseline[0] * CAPACITY_SWEEP_FACTORS[1]
-            else:
-                low, ref, high = DESIGN_RANGES[cls][parameter_index-1]
+            low_factor, high_factor = factor_ranges[parameter_index]
+            ref = baseline[parameter_index]
+            low, high = ref * low_factor, ref * high_factor
             if not 0 < low <= ref <= high:
                 raise ValueError(f"Invalid OAT range for {cls}/{site.name}: {(low, ref, high)}")
             if low == high:
@@ -768,9 +774,9 @@ def reference_grid_sweep(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Rerank observed economic medoids on a common EPR/WTIR grid.
 
-    The established economic-medoid criterion is unchanged: weighted mean
-    Euclidean distance between log CAPEX+ABEX component-rate vectors, with
-    IQR normalization and one total vote per distinct facility. Each site's
+    The economic-medoid criterion uses mean-normalised Euclidean distances
+    between CAPEX+ABEX component-rate vectors, with one total vote per
+    distinct physical facility. Each site's
     *own* documented reference working capacity is kept fixed throughout.
     No synthetic sites or per-country candidate restrictions are introduced.
 
@@ -871,7 +877,7 @@ def write_reference_grids(
     epr_factors: tuple[float, ...],
     wtir_values: tuple[float, ...],
 ) -> None:
-    """Export auditable long-form results and readable 4 x 10 site grids."""
+    """Export auditable long-form results and readable EPR x WTIR site grids."""
     detail_columns = [
         "storage_class", "technology", "EPR_factor", "EPR_days", "WTIR",
         "n_eligible_candidates", "n_eligible_facilities",
@@ -1030,7 +1036,8 @@ def main() -> None:
                         help="Sweep economic reference selection over the EPR x WTIR grid instead of the existing single-reference analysis")
     parser.add_argument("--grid-epr-factors", type=float, nargs="+",
                         default=list(GRID_EPR_FACTORS), metavar="FACTOR",
-                        help="EPR multipliers for reference grid (default: 0.5 1 1.5 2)")
+                        help=("EPR multipliers for reference grid (default: "
+                              + " ".join(f"{v:g}" for v in GRID_EPR_FACTORS) + ")"))
     parser.add_argument("--grid-wtir-values", type=float, nargs="+",
                         default=list(GRID_WTIR_VALUES), metavar="WTIR",
                         help="WTIR values for reference grid (default: integers 1..10)")
